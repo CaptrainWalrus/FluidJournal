@@ -2,7 +2,7 @@
 
 **Intelligent Trade Risk Management through Historical Pattern Analysis**
 
-FluidJournal is an adaptive risk management system that learns from trading history to prevent repeating costly mistakes. By analyzing thousands of past trades, it identifies market conditions that historically lead to losses and adjusts risk parameters accordingly.
+FluidJournal is an adaptive risk management system that learns from trading history to prevent repeating costly mistakes. By analyzing thousands of past trades (from backtesting with intentionally sub-optimal parameters), it identifies market conditions that historically lead to losses and adjusts risk parameters accordingly.
 
 ## The Problem
 
@@ -155,5 +155,3 @@ POST /api/store-vector
 - Portfolio-level risk management across multiple instruments
 
 ---
-
-*FluidJournal represents a paradigm shift from static trading rules to adaptive, learning-based risk management that evolves with market conditions.*
