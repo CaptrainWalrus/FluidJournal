@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  storage-agent:
+    build: 
+      context: ./storage-agent
+      dockerfile: Dockerfile
+    container_name: agentic-memory-storage-agent
+    ports:
+      - "3015:3015"
+    environment:
+      - NODE_ENV=production
+      - STORAGE_PORT=3015
+      - LANCEDB_PATH=/app/data/vectors
+      - VECTOR_RETENTION_DAYS=90
+    volumes:
+      - storage_data:/app/data
+      - ./storage-agent/logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - production-curves
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3015/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Future: Gradient Analyzer
+  # gradient-analyzer:
+  #   build:
+  #     context: ./gradient-analyzer
+  #   container_name: agentic-memory-gradient-analyzer
+  #   ports:
+  #     - "3016:3016"
+  #   depends_on:
+  #     - storage-agent
+  #   networks:
+  #     - production-curves
+
+  # Future: Risk Agent  
+  # risk-agent:
+  #   build:
+  #     context: ./risk-agent
+  #   container_name: agentic-memory-risk-agent
+  #   ports:
+  #     - "3017:3017"
+  #   depends_on:
+  #     - storage-agent
+  #     - gradient-analyzer
+  #   networks:
+  #     - production-curves
+
+volumes:
+  storage_data:
+    driver: local
+
+networks:
+  production-curves:
+    external: true

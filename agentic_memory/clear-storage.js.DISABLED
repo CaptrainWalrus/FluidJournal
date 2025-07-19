@@ -1,0 +1,54 @@
+#!/usr/bin/env node
+
+/**
+ * Clear Vector Storage Script
+ * 
+ * Cleans out all stored vectors to start fresh
+ */
+
+const fs = require('fs');
+const path = require('path');
+
+async function clearStorage() {
+    console.log('🧹 Clearing Agentic Memory Storage...');
+    
+    try {
+        // Path to LanceDB storage
+        const storagePath = './data/vectors';
+        
+        if (fs.existsSync(storagePath)) {
+            console.log('📁 Found storage directory, removing...');
+            fs.rmSync(storagePath, { recursive: true, force: true });
+            console.log('✅ Storage directory removed');
+        } else {
+            console.log('📁 Storage directory not found (already clean)');
+        }
+        
+        // Also clear any backup files
+        const backupFiles = [
+            './feature-selection.json',
+            './feature-selection-detailed.json'
+        ];
+        
+        backupFiles.forEach(file => {
+            if (fs.existsSync(file)) {
+                fs.unlinkSync(file);
+                console.log(`🗑️  Removed ${file}`);
+            }
+        });
+        
+        console.log('');
+        console.log('✅ Storage cleared successfully!');
+        console.log('');
+        console.log('Next steps:');
+        console.log('1. Restart storage-agent service');
+        console.log('2. Run trading positions to collect new data');
+        console.log('3. Monitor for low-variation issues');
+        
+    } catch (error) {
+        console.error('❌ Failed to clear storage:', error.message);
+        process.exit(1);
+    }
+}
+
+clearStorage();
