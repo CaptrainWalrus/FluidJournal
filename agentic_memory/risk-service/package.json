@@ -1,0 +1,32 @@
+{
+  "name": "agentic-memory-risk-service",
+  "version": "1.0.0",
+  "description": "Agentic Memory Risk Management Service - Adaptive risk management based on historical patterns",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "risk-management",
+    "agentic-memory",
+    "trading",
+    "pattern-matching",
+    "adaptive-learning"
+  ],
+  "author": "Trading System",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.10.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

@@ -1,0 +1,23 @@
+# Backtest Repository UI Dependencies
+
+# Core Streamlit
+streamlit>=1.28.0
+plotly>=5.15.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Data Processing
+lancedb>=0.3.0
+pyarrow>=12.0.0
+
+# UI Enhancement  
+streamlit-aggrid>=0.3.4
+streamlit-plotly-events>=0.0.6
+
+# Optional: For real integration
+requests>=2.31.0
+python-dateutil>=2.8.2
+
+# Development
+pytest>=7.4.0
+black>=23.0.0

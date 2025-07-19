@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Direct LanceDB Monte Carlo Explorer</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #e0e0e0;
+        }
+        
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            color: #4fc3f7;
+            margin-bottom: 30px;
+        }
+        
+        .file-input {
+            background: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        
+        .file-input input[type="file"] {
+            background: #333;
+            color: #e0e0e0;
+            padding: 10px;
+            border: 1px solid #555;
+            border-radius: 4px;
+            width: 100%;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+        
+        .stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #4fc3f7;
+            margin-bottom: 5px;
+        }
+        
+        .stat-label {
+            color: #888;
+            font-size: 14px;
+        }
+        
+        .combinations-list {
+            background: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .combination-row {
+            padding: 15px;
+            border-bottom: 1px solid #333;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .combination-row:hover {
+            background: #333;
+        }
+        
+        .combination-row.selected {
+            background: #0d47a1;
+        }
+        
+        .combination-header {
+            font-weight: 600;
+            color: #4fc3f7;
+            margin-bottom: 8px;
+            font-size: 16px;
+        }
+        
+        .combination-stats {
+            font-size: 13px;
+            color: #bbb;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 10px;
+        }
+        
+        .reliability-bar {
+            width: 60px;
+            height: 6px;
+            background: #333;
+            border-radius: 3px;
+            overflow: hidden;
+            display: inline-block;
+            margin-left: 5px;
+            vertical-align: middle;
+        }
+        
+        .reliability-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #f44336, #ff9800, #4caf50);
+            transition: width 0.3s ease;
+        }
+        
+        .chart-container {
+            background: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #333;
+            margin-bottom: 20px;
+        }
+        
+        .chart-title {
+            font-size: 16px;
+            color: #4fc3f7;
+            margin-bottom: 15px;
+            font-weight: 600;
+        }
+        
+        .chart {
+            height: 300px;
+            width: 100%;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        
+        .error {
+            color: #f44336;
+            text-align: center;
+            padding: 40px;
+        }
+        
+        .success {
+            color: #4caf50;
+            font-weight: 600;
+        }
+        
+        button {
+            background: #4fc3f7;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        button:hover {
+            background: #29b6f6;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Direct LanceDB Monte Carlo Explorer</h1>
+        
+        <div class="file-input">
+            <h3>Upload LanceDB Data</h3>
+            <p>Export your vectors to CSV first: <code>curl http://localhost:3015/api/export/csv > vectors.csv</code></p>
+            <input type="file" id="csvFile" accept=".csv" />
+            <button onclick="exportFromAPI()">Or Export Directly from API</button>
+        </div>
+        
+        <div class="stats-grid" id="statsGrid" style="display: none;">
+            <div class="stat-card">
+                <div class="stat-value" id="totalVectors">-</div>
+                <div class="stat-label">Total Vectors</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="totalFeatures">-</div>
+                <div class="stat-label">Features per Vector</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="avgPnL">-</div>
+                <div class="stat-label">Average PnL</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="winRate">-</div>
+                <div class="stat-label">Win Rate</div>
+            </div>
+        </div>
+        
+        <div class="combinations-list" id="combinationsList" style="display: none;">
+            <div class="chart-title">Feature Combinations (Click to analyze)</div>
+            <div id="combinationsContent"></div>
+        </div>
+        
+        <div class="chart-container" id="monteCarlo" style="display: none;">
+            <div class="chart-title">Monte Carlo Analysis: <span id="selectedCombo">None Selected</span></div>
+            <canvas id="monteCarloChart" class="chart"></canvas>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        let vectorData = null;
+        let featureCombinations = null;
+        let selectedCombination = null;
+        let chart = null;
+        
+        class DirectLanceDBAnalyzer {
+            constructor() {
+                this.initializeEventListeners();
+            }
+            
+            initializeEventListeners() {
+                document.getElementById('csvFile').addEventListener('change', (e) => {
+                    this.handleFileUpload(e.target.files[0]);
+                });
+            }
+            
+            async handleFileUpload(file) {
+                if (!file) return;
+                
+                try {
+                    const text = await file.text();
+                    const data = this.parseCSV(text);
+                    console.log('Parsed data:', data.length, 'rows');
+                    
+                    if (data.length === 0) {
+                        throw new Error('No data found in CSV file');
+                    }
+                    
+                    vectorData = data;
+                    this.analyzeData();
+                    
+                } catch (error) {
+                    console.error('Failed to process file:', error);
+                    alert('Failed to process file: ' + error.message);
+                }
+            }
+            
+            parseCSV(text) {
+                const lines = text.trim().split('\n');
+                if (lines.length < 2) return [];
+                
+                const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+                const data = [];
+                
+                for (let i = 1; i < lines.length; i++) {
+                    const values = this.parseCSVLine(lines[i]);
+                    if (values.length === headers.length) {
+                        const row = {};
+                        headers.forEach((header, index) => {
+                            row[header] = values[index];
+                        });
+                        data.push(row);
+                    }
+                }
+                
+                return data;
+            }
+            
+            parseCSVLine(line) {
+                const result = [];
+                let current = '';
+                let inQuotes = false;
+                
+                for (let i = 0; i < line.length; i++) {
+                    const char = line[i];
+                    
+                    if (char === '"') {
+                        inQuotes = !inQuotes;
+                    } else if (char === ',' && !inQuotes) {
+                        result.push(current.trim());
+                        current = '';
+                    } else {
+                        current += char;
+                    }
+                }
+                result.push(current.trim());
+                
+                return result.map(v => v.replace(/"/g, ''));
+            }
+            
+            analyzeData() {
+                // Extract features and PnL data
+                const features = this.extractFeatures();
+                const pnlData = this.extractPnLData();
+                
+                console.log('Features found:', features.length);
+                console.log('PnL data points:', pnlData.length);
+                
+                // Update stats
+                this.updateStats(features, pnlData);
+                
+                // Analyze feature combinations
+                featureCombinations = this.analyzeFeatureCombinations(features, pnlData);
+                this.renderCombinations();
+                
+                // Show UI elements
+                document.getElementById('statsGrid').style.display = 'grid';
+                document.getElementById('combinationsList').style.display = 'block';
+                document.getElementById('monteCarlo').style.display = 'block';
+            }
+            
+            extractFeatures() {
+                if (!vectorData || vectorData.length === 0) return [];
+                
+                // Find feature columns (numeric columns that aren't metadata)
+                const sample = vectorData[0];
+                const featureColumns = [];
+                
+                for (const [key, value] of Object.entries(sample)) {
+                    // Skip metadata columns
+                    if (['id', 'entrySignalId', 'instrument', 'entryType', 'direction', 
+                         'recordType', 'status', 'timestamp', 'pnl', 'pnlDollars', 
+                         'outcome', 'exitReason'].includes(key)) {
+                        continue;
+                    }
+                    
+                    // Check if it's a numeric feature
+                    const numValue = parseFloat(value);
+                    if (!isNaN(numValue) && isFinite(numValue)) {
+                        featureColumns.push(key);
+                    }
+                }
+                
+                return featureColumns.slice(0, 20); // Limit for performance
+            }
+            
+            extractPnLData() {
+                return vectorData.map(row => {
+                    const pnl = parseFloat(row.pnl || row.pnlDollars || 0);
+                    return {
+                        pnl: isNaN(pnl) ? 0 : pnl,
+                        instrument: row.instrument || 'UNKNOWN',
+                        direction: row.direction || 'unknown'
+                    };
+                }).filter(item => item.pnl !== 0);
+            }
+            
+            updateStats(features, pnlData) {
+                const totalVectors = vectorData.length;
+                const totalFeatures = features.length;
+                const avgPnL = pnlData.length > 0 ? 
+                    pnlData.reduce((sum, item) => sum + item.pnl, 0) / pnlData.length : 0;
+                const wins = pnlData.filter(item => item.pnl > 0).length;
+                const winRate = pnlData.length > 0 ? wins / pnlData.length : 0;
+                
+                document.getElementById('totalVectors').textContent = totalVectors.toLocaleString();
+                document.getElementById('totalFeatures').textContent = totalFeatures;
+                document.getElementById('avgPnL').textContent = '$' + avgPnL.toFixed(2);
+                document.getElementById('winRate').textContent = (winRate * 100).toFixed(1) + '%';
+            }
+            
+            analyzeFeatureCombinations(features, pnlData) {
+                if (features.length < 2) return [];
+                
+                const combinations = [];
+                
+                // Create feature pairs (limit to top combinations for performance)
+                for (let i = 0; i < Math.min(features.length, 10); i++) {
+                    for (let j = i + 1; j < Math.min(features.length, 10); j++) {
+                        const pair = [features[i], features[j]];
+                        const analysis = this.analyzeFeaturePair(pair, pnlData);
+                        
+                        if (analysis.trades >= 5) {
+                            combinations.push({
+                                features: pair,
+                                ...analysis,
+                                reliability: this.calculateReliability(analysis)
+                            });
+                        }
+                    }
+                }
+                
+                return combinations.sort((a, b) => b.reliability - a.reliability);
+            }
+            
+            analyzeFeaturePair(featurePair, pnlData) {
+                // For demo, use all PnL data (in real implementation, would filter by feature ranges)
+                const pnlValues = pnlData.map(item => item.pnl);
+                const wins = pnlValues.filter(p => p > 0).length;
+                
+                return {
+                    trades: pnlValues.length,
+                    pnlValues: pnlValues,
+                    meanPnL: this.mean(pnlValues),
+                    stdDev: this.standardDeviation(pnlValues),
+                    winRate: pnlValues.length > 0 ? wins / pnlValues.length : 0,
+                    minPnL: Math.min(...pnlValues),
+                    maxPnL: Math.max(...pnlValues)
+                };
+            }
+            
+            calculateReliability(analysis) {
+                if (analysis.trades < 5) return 0;
+                
+                const consistencyScore = 1 / (1 + analysis.stdDev / 20);
+                const sampleScore = Math.min(1, analysis.trades / 100);
+                const profitabilityScore = Math.max(0, analysis.winRate);
+                
+                return (consistencyScore * 0.4 + sampleScore * 0.3 + profitabilityScore * 0.3);
+            }
+            
+            renderCombinations() {
+                const container = document.getElementById('combinationsContent');
+                
+                if (!featureCombinations || featureCombinations.length === 0) {
+                    container.innerHTML = '<div class="error">No feature combinations found</div>';
+                    return;
+                }
+                
+                const html = featureCombinations.map((combo, index) => `
+                    <div class="combination-row" data-index="${index}">
+                        <div class="combination-header">
+                            ${combo.features.join(' + ')}
+                        </div>
+                        <div class="combination-stats">
+                            <span>Trades: ${combo.trades}</span>
+                            <span>Win Rate: ${(combo.winRate * 100).toFixed(1)}%</span>
+                            <span>Avg PnL: $${combo.meanPnL.toFixed(2)}</span>
+                            <span>Std Dev: ${combo.stdDev.toFixed(1)}</span>
+                            <span>Reliability: ${(combo.reliability * 100).toFixed(0)}%
+                                <span class="reliability-bar">
+                                    <span class="reliability-fill" style="width: ${combo.reliability * 100}%"></span>
+                                </span>
+                            </span>
+                        </div>
+                    </div>
+                `).join('');
+                
+                container.innerHTML = html;
+                
+                // Add click handlers
+                container.querySelectorAll('.combination-row').forEach((row, index) => {
+                    row.addEventListener('click', () => this.selectCombination(index));
+                });
+                
+                // Auto-select first combination
+                if (featureCombinations.length > 0) {
+                    this.selectCombination(0);
+                }
+            }
+            
+            selectCombination(index) {
+                // Update UI selection
+                document.querySelectorAll('.combination-row').forEach(row => 
+                    row.classList.remove('selected'));
+                document.querySelector(`[data-index="${index}"]`).classList.add('selected');
+                
+                selectedCombination = featureCombinations[index];
+                document.getElementById('selectedCombo').textContent = selectedCombination.features.join(' + ');
+                
+                this.generateMonteCarlo(selectedCombination);
+            }
+            
+            generateMonteCarlo(combination) {
+                const simulations = 1000;
+                const results = [];
+                
+                for (let i = 0; i < simulations; i++) {
+                    const basePnL = combination.meanPnL;
+                    const noise = this.gaussianRandom() * combination.stdDev;
+                    const predictedPnL = basePnL + noise;
+                    
+                    results.push(predictedPnL);
+                }
+                
+                this.updateMonteCarloChart(results, combination);
+            }
+            
+            updateMonteCarloChart(results, combination) {
+                const ctx = document.getElementById('monteCarloChart').getContext('2d');
+                
+                // Create histogram
+                const min = Math.min(...results);
+                const max = Math.max(...results);
+                const binCount = 20;
+                const binSize = (max - min) / binCount;
+                
+                const bins = Array.from({length: binCount}, (_, i) => {
+                    const binStart = min + i * binSize;
+                    const binEnd = min + (i + 1) * binSize;
+                    const count = results.filter(v => v >= binStart && v < binEnd).length;
+                    return {
+                        label: `$${binStart.toFixed(0)}`,
+                        count: count
+                    };
+                });
+                
+                if (chart) {
+                    chart.destroy();
+                }
+                
+                chart = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: bins.map(b => b.label),
+                        datasets: [{
+                            label: 'Monte Carlo Simulations',
+                            data: bins.map(b => b.count),
+                            backgroundColor: 'rgba(79, 195, 247, 0.7)',
+                            borderColor: '#4fc3f7',
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false },
+                            title: {
+                                display: true,
+                                text: `${combination.features.join(' + ')} - ${results.length} simulations`,
+                                color: '#e0e0e0'
+                            }
+                        },
+                        scales: {
+                            x: {
+                                title: { display: true, text: 'PnL Range ($)', color: '#888' },
+                                ticks: { color: '#888' },
+                                grid: { color: '#333' }
+                            },
+                            y: {
+                                title: { display: true, text: 'Frequency', color: '#888' },
+                                ticks: { color: '#888' },
+                                grid: { color: '#333' }
+                            }
+                        }
+                    }
+                });
+            }
+            
+            // Utility functions
+            mean(arr) {
+                return arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+            }
+            
+            standardDeviation(arr) {
+                if (arr.length === 0) return 0;
+                const mean = this.mean(arr);
+                const squaredDiffs = arr.map(val => Math.pow(val - mean, 2));
+                return Math.sqrt(this.mean(squaredDiffs));
+            }
+            
+            gaussianRandom() {
+                let u = 0, v = 0;
+                while(u === 0) u = Math.random();
+                while(v === 0) v = Math.random();
+                return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+            }
+        }
+        
+        // Export function
+        async function exportFromAPI() {
+            try {
+                const response = await fetch('/api/export/csv');
+                if (!response.ok) {
+                    throw new Error(`API returned ${response.status}`);
+                }
+                
+                const csvText = await response.text();
+                const blob = new Blob([csvText], { type: 'text/csv' });
+                const url = URL.createObjectURL(blob);
+                
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'vectors.csv';
+                a.click();
+                
+                URL.revokeObjectURL(url);
+                
+                alert('CSV exported! Now upload the downloaded file using the file input above.');
+                
+            } catch (error) {
+                alert('Export failed: ' + error.message + '. Try downloading manually: curl http://localhost:3015/api/export/csv > vectors.csv');
+            }
+        }
+        
+        // Initialize
+        new DirectLanceDBAnalyzer();
+    </script>
+</body>
+</html>

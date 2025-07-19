@@ -1,0 +1,208 @@
+#!/usr/bin/env node
+
+/**
+ * Automated Wipe All But One Record from Agentic Memory Storage
+ * 
+ * This script automatically removes all but the most recent record from the LanceDB storage matrix.
+ * Use this for quick automated cleanup without interactive prompts.
+ */
+
+const lancedb = require('vectordb');
+const path = require('path');
+
+class AutoStorageWiper {
+  constructor() {
+    this.db = null;
+    this.table = null;
+    this.dbPath = process.env.LANCEDB_PATH || './data/vectors';
+    this.tableName = 'feature_vectors';
+  }
+
+  async initialize() {
+    try {
+      console.log('🔗 Connecting to LanceDB...');
+      
+      // Connect to LanceDB
+      this.db = await lancedb.connect(this.dbPath);
+      
+      // Check if table exists
+      const tables = await this.db.tableNames();
+      
+      if (!tables.includes(this.tableName)) {
+        console.log('❌ No storage table found - database is empty');
+        return false;
+      }
+      
+      this.table = await this.db.openTable(this.tableName);
+      console.log('✅ Connected to storage table');
+      return true;
+      
+    } catch (error) {
+      console.error('❌ Failed to connect to storage:', error.message);
+      throw error;
+    }
+  }
+
+  async getStats() {
+    try {
+      const allVectors = await this.table.filter('id IS NOT NULL').limit(1000000).execute();
+      return {
+        totalCount: allVectors.length,
+        vectors: allVectors
+      };
+    } catch (error) {
+      console.error('❌ Failed to get stats:', error.message);
+      throw error;
+    }
+  }
+
+  async wipeAllButMostRecent() {
+    try {
+      console.log('📊 Analyzing current storage...');
+      
+      const stats = await this.getStats();
+      
+      if (stats.totalCount === 0) {
+        console.log('📝 Storage is already empty - nothing to wipe');
+        return { success: true, message: 'Already empty' };
+      }
+
+      if (stats.totalCount === 1) {
+        console.log('📝 Storage already has only one record - nothing to wipe');
+        return { success: true, message: 'Already minimal' };
+      }
+
+      console.log(`📈 Found ${stats.totalCount} records in storage`);
+      
+      // Sort by timestamp to find most recent
+      const sortedVectors = stats.vectors.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      const mostRecentRecord = sortedVectors[0];
+      const recordsToDelete = sortedVectors.slice(1);
+
+      console.log(`\n📋 KEEPING MOST RECENT RECORD:`);
+      console.log(`   ID: ${mostRecentRecord.id}`);
+      console.log(`   Instrument: ${mostRecentRecord.instrument || 'N/A'}`);
+      console.log(`   Entry Type: ${mostRecentRecord.entryType || 'N/A'}`);
+      console.log(`   PnL: $${(mostRecentRecord.pnl || 0).toFixed(2)}`);
+      console.log(`   Date: ${new Date(mostRecentRecord.timestamp).toLocaleString()}`);
+
+      console.log(`\n🗑️  Deleting ${recordsToDelete.length} older records...`);
+      
+      // Delete all records except the most recent
+      for (const record of recordsToDelete) {
+        await this.table.delete(`id = '${record.id}'`);
+        console.log(`   ✅ Deleted: ${record.id.substring(0, 24)}... (${new Date(record.timestamp).toLocaleDateString()})`);
+      }
+
+      console.log(`\n✅ Successfully deleted ${recordsToDelete.length} records`);
+      console.log(`📝 Kept 1 record: ${mostRecentRecord.id}`);
+
+      // Verify the wipe
+      const finalStats = await this.getStats();
+      console.log(`\n📊 Final storage count: ${finalStats.totalCount} records`);
+
+      return {
+        success: true,
+        message: `Wiped ${recordsToDelete.length} records, kept most recent`,
+        keptRecord: mostRecentRecord.id,
+        deletedCount: recordsToDelete.length
+      };
+
+    } catch (error) {
+      console.error('❌ Failed to wipe storage:', error.message);
+      throw error;
+    }
+  }
+
+  async close() {
+    try {
+      if (this.db) {
+        this.db = null;
+        this.table = null;
+        console.log('🔌 Disconnected from storage');
+      }
+    } catch (error) {
+      console.error('❌ Error closing storage:', error.message);
+    }
+  }
+}
+
+// Main execution
+async function main() {
+  // Check for --force flag
+  const args = process.argv.slice(2);
+  const forceMode = args.includes('--force');
+  
+  console.log('🧹 AUTOMATED AGENTIC MEMORY STORAGE WIPER');
+  console.log('═'.repeat(80));
+  
+  if (!forceMode) {
+    console.log('⚠️  WARNING: This will delete all but the most recent record!');
+    console.log('💡 Use --force flag to skip this warning');
+    console.log('═'.repeat(80));
+    
+    const readline = require('readline').createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+
+    const question = (prompt) => new Promise((resolve) => {
+      readline.question(prompt, resolve);
+    });
+
+    const confirmAnswer = await question('\n🤔 Continue? (yes/no): ');
+    readline.close();
+    
+    if (confirmAnswer.toLowerCase() !== 'yes') {
+      console.log('❌ Operation cancelled');
+      process.exit(0);
+    }
+  }
+  
+  const wiper = new AutoStorageWiper();
+  
+  try {
+    const initialized = await wiper.initialize();
+    if (!initialized) {
+      console.log('❌ Could not initialize storage connection');
+      process.exit(1);
+    }
+
+    const result = await wiper.wipeAllButMostRecent();
+    
+    if (result.success) {
+      console.log('\n✅ Automated storage wipe completed successfully');
+      console.log(`📊 Result: ${result.message}`);
+    } else {
+      console.log('\n❌ Automated storage wipe failed');
+      console.log(`📊 Result: ${result.message}`);
+    }
+
+  } catch (error) {
+    console.error('\n❌ FATAL ERROR:', error.message);
+    process.exit(1);
+  } finally {
+    await wiper.close();
+  }
+}
+
+// Handle graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('\n\n🛑 Received interrupt signal');
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('\n\n🛑 Received termination signal');
+  process.exit(0);
+});
+
+// Run the script
+if (require.main === module) {
+  main().catch(error => {
+    console.error('❌ Unhandled error:', error);
+    process.exit(1);
+  });
+}
+
+module.exports = AutoStorageWiper;

@@ -1,0 +1,21 @@
+{
+  "pnl": {
+    "mse": 0.0,
+    "r2": "1.0",
+    "mean_uncertainty": 0.004581445123846152,
+    "kernel_params": "RBF(length_scale=10) + WhiteKernel(noise_level=1e-05)"
+  },
+  "trajectory": {
+    "mse": 0.0,
+    "r2": "1.0",
+    "n_outputs": "3"
+  },
+  "risk": {
+    "mse": 0.0,
+    "r2": "1.0",
+    "n_outputs": "2"
+  },
+  "timestamp": "2025-07-15T17:18:47.509546",
+  "instrument": "MGC",
+  "direction": "short"
+}
