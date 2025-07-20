@@ -153,13 +153,33 @@ def generate_realistic_equity_curve(session_data, start_date=None, end_date=None
     if end_date is None:
         end_date = session_data['timestamp']
     
-    dates = pd.date_range(start=start_date, end=end_date, periods=len(cumulative_equity))
+    # Create consistent number of data points
+    target_points = 100
+    
+    # If we have different number of trades, resample the equity curve
+    if len(cumulative_equity) != target_points:
+        # Interpolate to target number of points
+        old_indices = np.arange(len(cumulative_equity))
+        new_indices = np.linspace(0, len(cumulative_equity)-1, target_points)
+        cumulative_equity_resampled = np.interp(new_indices, old_indices, cumulative_equity)
+        
+        # Resample PnL similarly
+        pnl_array = np.array([0] + trades_pnl)
+        if len(pnl_array) > 1:
+            pnl_resampled = np.interp(new_indices, old_indices, pnl_array)
+        else:
+            pnl_resampled = np.zeros(target_points)
+            
+        cumulative_equity = cumulative_equity_resampled
+        trades_pnl = pnl_resampled.tolist()[1:]  # Remove the first 0
+    
+    dates = pd.date_range(start=start_date, end=end_date, periods=target_points)
     
     return pd.DataFrame({
         'Date': dates,
         'Equity': cumulative_equity,
         'Trade': range(len(cumulative_equity)),
-        'PnL': [0] + trades_pnl
+        'PnL': [0] + trades_pnl[:target_points-1]  # Ensure correct length
     })
 
 def create_strategy_overview(df):
@@ -274,15 +294,25 @@ def create_strategy_equity_overlay(df):
         
         # Add average performance line for each strategy
         avg_curve_data = []
+        target_length = 100  # Fixed number of points for consistency
+        
         for _, session in strategy_data.iterrows():
             equity_curve = generate_realistic_equity_curve(session, start_date, end_date)
             if normalize_start:
                 equity_curve['Equity'] = equity_curve['Equity'] - equity_curve['Equity'].iloc[0] + 10000
-            avg_curve_data.append(equity_curve['Equity'].values)
+            
+            # Resample to fixed length
+            if len(equity_curve) != target_length:
+                indices = np.linspace(0, len(equity_curve)-1, target_length, dtype=int)
+                resampled_equity = equity_curve['Equity'].iloc[indices].values
+            else:
+                resampled_equity = equity_curve['Equity'].values
+                
+            avg_curve_data.append(resampled_equity)
         
         if avg_curve_data:
-            avg_equity = np.mean(avg_curve_data, axis=0)
-            dates = pd.date_range(start=start_date, end=end_date, periods=len(avg_equity))
+            avg_equity = np.mean(np.array(avg_curve_data), axis=0)
+            dates = pd.date_range(start=start_date, end=end_date, periods=target_length)
             
             fig.add_trace(go.Scatter(
                 x=dates,
