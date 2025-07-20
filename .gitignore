@@ -32,6 +32,8 @@ agentic_memory/venv/
 node_modules/
 venv/
 gpu_venv/
+streamlit_env/
+**/streamlit_env/
 
 # Environment files
 .env
