@@ -204,7 +204,7 @@ async function main() {
     const report = {
         timestamp: new Date().toISOString(),
         comparison: {
-            range_based: {
+            graduated_ranges: {
                 strengths: [
                     "Learns optimal ranges from profitable trades",
                     "Clear confidence differentiation (10-95%)",

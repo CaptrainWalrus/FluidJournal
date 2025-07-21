@@ -341,6 +341,7 @@ class AgenticMemoryClient {
       if (filters.since) queryParams.append('since', filters.since);
       if (filters.limit) queryParams.append('limit', filters.limit);
       if (filters.entryType) queryParams.append('entryType', filters.entryType);
+      if (filters.dataType) queryParams.append('dataType', filters.dataType);
 
       const response = await fetch(`${this.baseUrl}/api/vectors?${queryParams}`, {
         method: 'GET',
@@ -357,6 +358,57 @@ class AgenticMemoryClient {
     } catch (error) {
       console.error(`[AGENTIC-MEMORY] Failed to get vectors: ${error.message}`);
       return [];
+    }
+  }
+
+  /**
+   * Bulk delete vectors by IDs
+   * @param {Array<string>} vectorIds - Array of vector IDs to delete
+   * @returns {Promise<Object>} Deletion result with counts
+   */
+  async deleteBulkVectors(vectorIds) {
+    if (!this.enabled) {
+      return { 
+        deletedCount: 0, 
+        failedCount: vectorIds.length, 
+        failedIds: vectorIds,
+        error: 'Agentic Memory disabled' 
+      };
+    }
+
+    try {
+      const response = await fetch(`${this.baseUrl}/api/delete-bulk`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ vectorIds }),
+        timeout: this.timeout * 2 // Extended timeout for bulk operations
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      }
+
+      const result = await response.json();
+      
+      console.log(`[AGENTIC-MEMORY] Bulk deletion completed:`, {
+        deletedCount: result.deletedCount,
+        failedCount: result.failedCount,
+        totalRequested: vectorIds.length
+      });
+
+      return result;
+
+    } catch (error) {
+      console.error(`[AGENTIC-MEMORY] Bulk deletion failed: ${error.message}`);
+      return {
+        deletedCount: 0,
+        failedCount: vectorIds.length,
+        failedIds: vectorIds,
+        error: error.message
+      };
     }
   }
 

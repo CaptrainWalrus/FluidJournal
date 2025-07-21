@@ -6,6 +6,8 @@ const GPIntegration = require('./gpIntegration');
 const ConfidenceEngine = require('./confidenceEngine');
 const ABTestingFramework = require('./abTesting');
 const OnlineLearning = require('./onlineLearning');
+const PrunedRangesEngine = require('./prunedRangesEngine');
+const RobustZoneEngine = require('./robustZoneEngine');
 const app = express();
 const port = process.env.RISK_SERVICE_PORT || 3017;
 
@@ -26,6 +28,12 @@ const abTesting = process.env.ENABLE_AB_TESTING === 'true' ? new ABTestingFramew
 // Initialize Online Learning
 const onlineLearning = new OnlineLearning(gpIntegration, confidenceEngine, abTesting);
 
+// Initialize Pruned Ranges Engine (legacy)
+const prunedRangesEngine = new PrunedRangesEngine();
+
+// Initialize Robust Zone Engine (new implementation)
+const robustZoneEngine = new RobustZoneEngine();
+
 // Initialize Risk Variation Strategy for backtesting
 const RiskVariationStrategy = require('../risk-variation-strategy');
 const riskVariation = new RiskVariationStrategy();
@@ -34,6 +42,8 @@ const riskVariation = new RiskVariationStrategy();
 const CONFIG = {
     ENABLE_GP_INTEGRATION: process.env.ENABLE_GP_INTEGRATION !== 'false',
     ENABLE_AB_TESTING: process.env.ENABLE_AB_TESTING === 'true',
+    ENABLE_PRUNED_RANGES: process.env.ENABLE_PRUNED_RANGES === 'true',
+    ENABLE_ROBUST_ZONES: process.env.ENABLE_ROBUST_ZONES !== 'false', // Default to true
     BACKTEST_MODE: process.env.BACKTEST_MODE === 'true',
     
     // Minimum similar patterns to provide recommendations (relaxed for learning)
@@ -612,12 +622,12 @@ app.post('/api/approve-signal', async (req, res) => {
             console.log(`[RISK-SERVICE] STAGE3: Using MEMORY-based recent trade analysis...`);
             const stage3Start = Date.now();
             recentTradeAnalysis = analyzeRecentTradesFromMemory(instrument, direction, timestamp);
-            console.log(`[RISK-SERVICE] STAGE3-RECENT: Recent trade analysis completed - Duration: ${Date.now() - stage3Start}ms`);
+            // Removed verbose stage duration logging
         } else {
             console.log(`[RISK-SERVICE] STAGE3: Using STORAGE-based recent trade analysis...`);
             const stage3Start = Date.now();
             recentTradeAnalysis = await analyzeRecentTrades(instrument, direction, timestamp);
-            console.log(`[RISK-SERVICE] STAGE3-RECENT: Recent trade analysis completed - Duration: ${Date.now() - stage3Start}ms`);
+            // Removed verbose stage duration logging
         }
         
         // Apply recent trade analysis to risk recommendation
@@ -701,13 +711,16 @@ app.post('/api/approve-signal', async (req, res) => {
             })
         };
 
-        console.log(`[RISK-SERVICE] Response: approved=${response.approved}, confidence=${response.confidence.toFixed(2)}, SL=${response.suggested_sl}, TP=${response.suggested_tp} (${duration}ms)`);
-        console.log(`[RISK-SERVICE] Full response being sent:`, JSON.stringify(response, null, 2));
+        // Single line decision format: [Confidence] [Reasoning] [Error] [JSON]
+        const confidence = `${(response.confidence * 100).toFixed(0)}%`;
+        const reasoning = response.reasoning || response.reasons?.[0] || 'No reasoning provided';
+        console.log(`[${confidence}] ${reasoning}`);
 
         res.json(response);
 
     } catch (error) {
-        console.error(`[RISK-SERVICE] Error processing approval request:`, error.message);
+        // Single line error format: [Confidence] [Reasoning] [Error] [JSON]
+        console.log(`[0%] Service error: ${error.message} ERROR: ${error.name} ${JSON.stringify({stack: error.stack.split('\n')[0]})}`);
         
         // NO FALLBACKS - return the actual error
         res.status(500).json({
@@ -730,8 +743,8 @@ function analyzeRecentTradesFromMemory(instrument, direction, timestamp, limit =
     try {
         console.log(`[RECENT-TRADES-MEMORY] Analyzing last ${limit} trades for ${instrument} from memory`);
         
-        // Get recent trades from memory manager
-        const vectors = memoryManager.getVectorsForInstrumentDirection(instrument, direction);
+        // Get RECENT trades only from memory manager (not TRAINING data)
+        const vectors = memoryManager.getRecentVectorsForInstrumentDirection(instrument, direction);
         
         if (vectors.length === 0) {
             return {
@@ -748,13 +761,42 @@ function analyzeRecentTradesFromMemory(instrument, direction, timestamp, limit =
         const lookbackHours = 24;
         const lookbackTime = new Date(currentTime.getTime() - (lookbackHours * 60 * 60 * 1000));
         
-        const recentTrades = vectors
-            .filter(v => {
-                const tradeTime = new Date(v.timestamp);
-                return tradeTime >= lookbackTime && tradeTime < currentTime;
-            })
-            .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-            .slice(0, limit);
+        // DEBUG: Check timestamp alignment and dataType filtering
+        const allVectors = memoryManager.getVectorsForInstrumentDirection(instrument, direction);
+        console.log(`[DATATYPE-DEBUG] Total vectors: ${allVectors.length}, RECENT vectors: ${vectors.length}`);
+        
+        if (vectors.length > 0) {
+            const sampleTrade = vectors[0];
+            console.log(`[TIMESTAMP-DEBUG] Query time: ${currentTime.toISOString()}`);
+            console.log(`[TIMESTAMP-DEBUG] Lookback: ${lookbackTime.toISOString()}`);
+            console.log(`[TIMESTAMP-DEBUG] Sample RECENT trade time: ${new Date(sampleTrade.timestamp).toISOString()}`);
+            console.log(`[DATATYPE-DEBUG] Sample RECENT trade dataType: ${sampleTrade.dataType}`);
+        }
+        
+        if (allVectors.length > 0) {
+            const dataTypes = [...new Set(allVectors.map(v => v.dataType || 'undefined'))];
+            console.log(`[DATATYPE-DEBUG] Available dataTypes: ${dataTypes.join(', ')}`);
+        }
+        
+        let recentTrades;
+        
+        // BACKTEST MODE: Use sequence-based filtering instead of time-based
+        if (CONFIG.BACKTEST_MODE || vectors.length > 0 && vectors.every(v => !v.dataType || v.dataType === undefined)) {
+            console.log(`[BACKTEST-MODE] Using sequence-based recent trades (last ${limit} trades)`);
+            // Sort by timestamp and take the last N trades (most recent by sequence)
+            recentTrades = vectors
+                .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+                .slice(0, limit);
+        } else {
+            // LIVE MODE: Use time-based filtering with bar timestamps
+            recentTrades = vectors
+                .filter(v => {
+                    const tradeTime = new Date(v.timestamp);
+                    return tradeTime >= lookbackTime && tradeTime < currentTime;
+                })
+                .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+                .slice(0, limit);
+        }
         
         console.log(`[RECENT-TRADES-MEMORY] Found ${recentTrades.length} recent trades for ${instrument} in last ${lookbackHours} hours`);
         
@@ -1060,6 +1102,14 @@ function calculateMemoryBasedRisk(instrument, direction, features, maxStopLoss =
             // Check how many vectors we have for this instrument+direction
             const vectors = memoryManager.getVectorsForInstrumentDirection(instrument, direction);
             console.log(`[MEMORY-RISK] No graduation table for ${instrument}_${direction} (${vectors.length} vectors, need 10+), using rule-based`);
+            
+            // DEBUG: Log more details for MNQ
+            if (instrument.toUpperCase().includes('MNQ')) {
+                console.log(`[MEMORY-RISK] DEBUG MNQ: Requested instrument="${instrument}", direction="${direction}"`);
+                console.log(`[MEMORY-RISK] DEBUG MNQ: Available graduation tables:`, Array.from(memoryManager.graduationTables.keys()));
+                console.log(`[MEMORY-RISK] DEBUG MNQ: Memory manager stats:`, memoryManager.getStats());
+            }
+            
             const duration = Date.now() - startTime;
             console.log(`[MEMORY-RISK] COMPLETED (insufficient data for graduation) - Duration: ${duration}ms`);
             return calculateRuleBasedRisk(features, direction, maxStopLoss, maxTakeProfit);
@@ -1106,7 +1156,7 @@ function calculateMemoryBasedRisk(instrument, direction, features, maxStopLoss =
             stopLoss: stopLoss,
             takeProfit: takeProfit,
             reasoning: reasoning,
-            method: 'range_based_analysis',
+            method: 'graduated_ranges_analysis',
             featuresAnalyzed: rangeAnalysis.validFeatures,
             rangeAnalysis: rangeAnalysis.featureConfidences,
             similarPatterns: [] // No specific patterns for range-based analysis
@@ -1247,7 +1297,7 @@ async function calculateAgenticRisk(instrument, direction, features, timestamp, 
         }
         const stage2cDuration = Date.now() - stage2cStart;
 
-        console.log(`[AGENTIC-RISK] SUBSTAGE2C-SIMILARITY: Similarity search completed - Duration: ${stage2cDuration}ms`);
+        // Removed verbose substage duration logging
         console.log(`[AGENTIC-RISK] Similarity search params: instrument=${instrument}, limit=25, threshold=${CONFIG.SIMILARITY_THRESHOLD}`);
         console.log(`[AGENTIC-RISK] Found ${similarPatterns.length} similar patterns for ${instrument}`);
         
@@ -2264,10 +2314,10 @@ app.post('/api/evaluate-risk', async (req, res) => {
     try {
         const { features, instrument, entryType, direction, timestamp, entrySignalId, maxStopLoss, maxTakeProfit, timeframeMinutes = 1, quantity = 1 } = req.body;
         
-        // PHASE 1 OPTIMIZATION: Skip logging in backtest mode for speed
+        // FOCUSED LOGGING: Only log in non-backtest mode and only essential info
         if (!CONFIG.BACKTEST_MODE) {
-            console.log(`[RISK-SERVICE] Evaluate risk request: ${direction} ${instrument} @ ${features?.close_price || 'unknown'} (${timeframeMinutes}m timeframe)`);
-            console.log(`[RISK-SERVICE] Timestamp from NT: ${timestamp}`);
+            // Minimal logging - only price and timeframe
+            console.log(`[RISK-SERVICE] ${direction} ${instrument} @ ${features?.close_price || 'unknown'}`);
         }
         
         if (!features || !instrument) {
@@ -2301,13 +2351,58 @@ app.post('/api/evaluate-risk', async (req, res) => {
         // STAGE 1: Choose prediction method based on A/B test or configuration
         const stage1Start = Date.now();
         let riskRecommendation;
-        let predictionMethod = 'range_based'; // Default
+        let predictionMethod = 'graduated_ranges'; // Default
         
         // Determine which method to use
         const useGP = (assignedVariant === 'gp') || 
                       (assignedVariant === null && CONFIG.ENABLE_GP_INTEGRATION === true);
+        const usePrunedRanges = (assignedVariant === 'pruned_ranges') ||
+                               (assignedVariant === null && CONFIG.ENABLE_PRUNED_RANGES === true);
+        const useRobustZones = (assignedVariant === 'robust_zones') ||
+                              (assignedVariant === null && CONFIG.ENABLE_ROBUST_ZONES === true);
         
-        if (useGP) {
+        if (useRobustZones) {
+            // ROBUST ZONES PREDICTION - NEW IMPLEMENTATION
+            predictionMethod = 'robust_zones';
+            
+            try {
+                // Check if memory manager is initialized
+                if (!memoryManager.isInitialized) {
+                    console.log('[ROBUST-ZONES] Memory not initialized - falling back to graduated_ranges');
+                    riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
+                    predictionMethod = 'graduated_ranges_fallback';
+                } else {
+                    // Run robust zones analysis
+                    const zonesAnalysis = await robustZoneEngine.analyze(features, instrument, direction, memoryManager);
+                    
+                    // Convert zones format to standard risk recommendation format
+                    riskRecommendation = {
+                        approved: zonesAnalysis.confidence >= 0.5,
+                        confidence: zonesAnalysis.confidence,
+                        suggested_sl: maxStopLoss || 10,  // Use defaults for now
+                        suggested_tp: maxTakeProfit || 15,
+                        stopLoss: maxStopLoss || 10,
+                        takeProfit: maxTakeProfit || 15,
+                        reasoning: zonesAnalysis.zone.description,
+                        method: 'robust_zones',
+                        robustZonesDetails: {
+                            zoneMembership: zonesAnalysis.membership.score,
+                            zoneRobustness: zonesAnalysis.zone.robustnessScore,
+                            sampleSize: zonesAnalysis.zone.sampleSize,
+                            inOptimalZone: zonesAnalysis.membership.inOptimalZone,
+                            processingTime: zonesAnalysis.processingTime
+                        }
+                    };
+                    
+                    // No verbose logging - robust zones engine handles its own focused logging
+                }
+                
+            } catch (error) {
+                console.log(`[ROBUST-ZONES] Analysis failed: ${error.message}, falling back to graduated_ranges`);
+                riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
+                predictionMethod = 'graduated_ranges_fallback';
+            }
+        } else if (useGP) {
             // GP INTEGRATION IS REQUIRED - NO FALLBACKS
             if (!gpIntegration || !gpIntegration.enabled) {
                 throw new Error('GP_INTEGRATION_REQUIRED_BUT_NOT_ENABLED');
@@ -2357,15 +2452,72 @@ app.post('/api/evaluate-risk', async (req, res) => {
                 console.error(`[RISK-SERVICE] GP prediction failed - NO FALLBACK: ${error.message}`);
                 throw new Error(`GP_INTEGRATION_FAILED: ${error.message}`);
             }
+        } else if (usePrunedRanges) {
+            // PRUNED RANGES PREDICTION
+            console.log(`[RISK-SERVICE] STAGE1: Using pruned ranges prediction...`);
+            predictionMethod = 'pruned_ranges';
+            
+            try {
+                // EARLY EXIT: Check if memory manager is initialized (same pattern as graduated_ranges)
+                if (!memoryManager.isInitialized) {
+                    console.log('[PRUNED-RANGES] Memory not initialized - falling back to graduated_ranges');
+                    riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
+                    predictionMethod = 'graduated_ranges_fallback';
+                } else {
+                    // FAST: Use memory-based trade data (identical to graduated_ranges approach)
+                    const recentTrades = memoryManager.getVectorsForInstrumentDirection(instrument, direction);
+                    console.log(`[PRUNED-RANGES] Retrieved ${recentTrades.length} trades from memory for ${instrument} ${direction}`);
+                    
+                    // EARLY EXIT: Check if we have enough data (same pattern as graduated_ranges)
+                    if (recentTrades.length < 10) {
+                        console.log(`[PRUNED-RANGES] Insufficient data for ${instrument}_${direction} (${recentTrades.length} vectors, need 10+), using graduated_ranges`);
+                        riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
+                        predictionMethod = 'graduated_ranges_fallback';
+                    } else {
+                        // Run pruned ranges analysis with full dataset and entry type
+                        const prunedAnalysis = await prunedRangesEngine.analyze(features, recentTrades, quantity, entryType);
+                        
+                        // Convert pruned ranges format to standard risk recommendation format
+                        riskRecommendation = {
+                            approved: prunedAnalysis.confidence >= 0.5,
+                            confidence: prunedAnalysis.confidence,
+                            suggested_sl: prunedAnalysis.riskParams.stopLoss,
+                            suggested_tp: prunedAnalysis.riskParams.takeProfit,
+                            stopLoss: prunedAnalysis.riskParams.stopLoss,
+                            takeProfit: prunedAnalysis.riskParams.takeProfit,
+                            reasoning: prunedAnalysis.cluster.reasoning || 'Multi-dimensional clustering analysis',
+                            riskParameters: prunedAnalysis.riskParams,
+                            method: 'pruned_ranges',
+                            prunedRangesDetails: {
+                                clusterQuality: prunedAnalysis.cluster.quality,
+                                scalability: prunedAnalysis.scalability,
+                                regimeChange: prunedAnalysis.regime.regimeChangeDetected,
+                                featureCombination: prunedAnalysis.featureCombination,
+                                processingTime: prunedAnalysis.processingTime
+                            }
+                        };
+                        
+                        console.log(`[RISK-SERVICE] Pruned ranges prediction completed: ${riskRecommendation.approved ? 'APPROVED' : 'REJECTED'} (${(riskRecommendation.confidence * 100).toFixed(1)}%)`);
+                        console.log(`[PRUNED-RANGES] Cluster quality: ${prunedAnalysis.cluster.quality?.toFixed(3)}, Scalability: ${prunedAnalysis.scalability.canScale}, Regime change: ${prunedAnalysis.regime.regimeChangeDetected}`);
+                    }
+                }
+                
+            } catch (error) {
+                console.error(`[RISK-SERVICE] Pruned ranges prediction failed: ${error.message}`);
+                // Fallback to graduated ranges for pruned ranges failures
+                console.log(`[RISK-SERVICE] Falling back to graduated ranges...`);
+                riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
+                predictionMethod = 'graduated_ranges_fallback';
+            }
         } else {
             // RANGE-BASED PREDICTION (original logic)
             console.log(`[RISK-SERVICE] STAGE1: Using range-based prediction...`);
             riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
-            predictionMethod = 'range_based';
+            predictionMethod = 'graduated_ranges';
         }
         
         const stage1Duration = Date.now() - stage1Start;
-        console.log(`[RISK-SERVICE] STAGE1-PREDICTION: ${predictionMethod} completed - Duration: ${stage1Duration}ms`);
+        // Removed verbose stage duration logging
         
         // STAGE 3: Analyze recent trades (optimized for memory manager)
         const stage3Start = Date.now();
@@ -2415,8 +2567,7 @@ app.post('/api/evaluate-risk', async (req, res) => {
         const duration = Date.now() - startTime;
         
         // STAGE 4: Format response
-        console.log(`[RISK-SERVICE] STAGE4-COMPLETE: Total request duration: ${duration}ms`);
-        console.log(`[RISK-SERVICE] BREAKDOWN: Stats=${stage1Duration}ms, Recent=${stage3Duration}ms`);
+        // Remove verbose timing logs - focus on exploration mode detection
         
         // Apply strategy-specific max limits if provided
         let finalStopLoss = riskRecommendation.stopLoss;
@@ -2482,8 +2633,10 @@ app.post('/api/evaluate-risk', async (req, res) => {
         
         // PHASE 1 OPTIMIZATION: Skip verbose logging in backtest mode
         if (!CONFIG.BACKTEST_MODE) {
-            console.log(`[RISK-SERVICE] Response: approved=${response.approved}, confidence=${response.confidence.toFixed(2)}, SL=${response.suggested_sl}, TP=${response.suggested_tp}`);
-            console.log(`[RISK-SERVICE] Full response:`, JSON.stringify(response, null, 2));
+            // Single line decision format: [Confidence] [Reasoning] [Error] [JSON]
+            const confidence = `${(response.confidence * 100).toFixed(0)}%`;
+            const reasoning = response.reasoning || response.reasons?.[0] || 'No reasoning provided';
+            console.log(`[${confidence}] ${reasoning}`);
         }
         
         // PHASE 1 OPTIMIZATION: Cache the response for future requests
@@ -2493,7 +2646,8 @@ app.post('/api/evaluate-risk', async (req, res) => {
         res.json(response);
         
     } catch (error) {
-        console.error('[RISK-SERVICE] Error in evaluate-risk:', error.message);
+        // Single line error format: [Confidence] [Reasoning] [Error] [JSON]
+        console.log(`[0%] Risk service failed: ${error.message} ERROR: ${error.name} ${JSON.stringify({stack: error.stack.split('\n')[0]})}`);
         
         // NO FALLBACKS - return the actual error to expose the problem
         res.status(500).json({
@@ -2646,9 +2800,17 @@ app.listen(port, async () => {
         try {
             await memoryManager.initialize();
             console.log(`🧠 Memory manager ready - fast risk decisions enabled`);
+            
+            // Debug: Show what was loaded
+            const stats = memoryManager.getStats();
+            console.log(`[MEMORY-DEBUG] Loaded ${stats.vectorCount} vectors, ${stats.instrumentCount} instruments`);
+            console.log(`[MEMORY-DEBUG] Instruments: ${stats.instruments.join(', ')}`);
+            console.log(`[MEMORY-DEBUG] Graduation tables: ${stats.graduationTables.join(', ')}`);
+            
         } catch (error) {
             console.log(`⚠️  Memory manager initialization failed: ${error.message}`);
             console.log(`🔄 Falling back to direct storage queries`);
+            console.log(`[MEMORY-DEBUG] Full error:`, error);
         }
     } else {
         console.log(`⚠️  Storage Agent not available - using rule-based fallback only`);

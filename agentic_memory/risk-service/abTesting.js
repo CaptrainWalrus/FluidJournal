@@ -8,10 +8,12 @@ const path = require('path');
 
 class ABTestingFramework {
   constructor() {
-    this.testName = 'gp_vs_range_comparison';
+    this.testName = 'three_way_comparison';
     this.testStartTime = new Date();
     this.testConfig = {
-      gp_traffic_percentage: 50, // 50% traffic to GP, 50% to Range
+      gp_traffic_percentage: 33, // 33% traffic to GP
+      pruned_ranges_traffic_percentage: 33, // 33% traffic to Pruned Ranges
+      graduated_ranges_traffic_percentage: 34, // 34% traffic to Graduated Ranges (default)
       min_samples_per_variant: 100,
       confidence_level: 0.95,
       test_duration_days: 30
@@ -27,7 +29,7 @@ class ABTestingFramework {
         predictions: [],
         errors: 0
       },
-      range: {
+      pruned_ranges: {
         total_requests: 0,
         approved: 0,
         rejected: 0,
@@ -36,7 +38,16 @@ class ABTestingFramework {
         predictions: [],
         errors: 0
       },
-      outcomes: [] // Store actual trade outcomes for both variants
+      graduated_ranges: {
+        total_requests: 0,
+        approved: 0,
+        rejected: 0,
+        avg_confidence: 0,
+        total_confidence: 0,
+        predictions: [],
+        errors: 0
+      },
+      outcomes: [] // Store actual trade outcomes for all variants
     };
     
     this.logDir = './ab_test_logs';
@@ -60,7 +71,14 @@ class ABTestingFramework {
     const hash = this.hashString(entrySignalId);
     const percentage = hash % 100;
     
-    const variant = percentage < this.testConfig.gp_traffic_percentage ? 'gp' : 'range';
+    let variant;
+    if (percentage < this.testConfig.gp_traffic_percentage) {
+      variant = 'gp';
+    } else if (percentage < this.testConfig.gp_traffic_percentage + this.testConfig.pruned_ranges_traffic_percentage) {
+      variant = 'pruned_ranges';
+    } else {
+      variant = 'graduated_ranges';
+    }
     
     console.log(`[AB-TEST] Signal ${entrySignalId} assigned to variant: ${variant.toUpperCase()}`);
     return variant;

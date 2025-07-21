@@ -21,7 +21,11 @@
     "axios": "^1.10.0",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "node-fetch": "^2.7.0"
+    "ml-kmeans": "^4.2.1",
+    "ml-pca": "^4.0.2",
+    "ml-distance": "^4.0.0",
+    "node-fetch": "^2.7.0",
+    "simple-statistics": "^7.8.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

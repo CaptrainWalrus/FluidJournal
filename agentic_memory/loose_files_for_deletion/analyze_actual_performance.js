@@ -24,7 +24,7 @@ async function analyzeActualPerformance() {
         // Analyze all trades
         vectors.forEach(v => {
             // Try to determine method from features or metadata
-            if (v.method === 'range_based' || v.confidence_method === 'range') {
+            if (v.method === 'graduated_ranges' || v.confidence_method === 'range') {
                 rangeBasedTrades.push(v);
             } else if (v.method === 'gaussian_process' || v.confidence_method === 'gp') {
                 gpTrades.push(v);

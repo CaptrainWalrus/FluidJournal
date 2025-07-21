@@ -66,6 +66,9 @@ class VectorStore {
         dir: 'L', // L/S instead of long/short (1 byte vs 4-5 bytes)
         qty: 1, // int16 sufficient for position size
         
+        // Data type for three-state system
+        dataType: 'TRAINING', // TRAINING, RECENT, or OUT_OF_SAMPLE
+        
         // Features as Float32Array for optimal packing
         features: new Float32Array(94), // Exact feature count, Float32 vs Float64
         
@@ -95,6 +98,17 @@ class VectorStore {
   }
 
   async storeVector(vectorData) {
+    // Add write queue to prevent concurrent write conflicts
+    if (!this.writeQueue) {
+      this.writeQueue = Promise.resolve();
+    }
+    
+    return this.writeQueue = this.writeQueue.then(async () => {
+      return this._storeVectorInternal(vectorData);
+    });
+  }
+
+  async _storeVectorInternal(vectorData) {
     try {
       console.log('\n[VECTOR-STORE] storeVector called with:', {
         entrySignalId: vectorData.entrySignalId,
@@ -102,7 +116,9 @@ class VectorStore {
         recordType: vectorData.recordType,
         hasFeatures: !!vectorData.features,
         hasOutcome: !!vectorData.outcome,
-        timestamp: vectorData.timestamp
+        timestamp: vectorData.timestamp,
+        timestampType: typeof vectorData.timestamp,
+        timestampDate: vectorData.timestamp ? new Date(vectorData.timestamp).toISOString() : 'undefined'
       });
       
       const {
@@ -118,11 +134,18 @@ class VectorStore {
         riskUsed = {},
         outcome,
         recordType = 'UNIFIED', // Force UNIFIED for all new records
-        status = 'UNIFIED'      // Force UNIFIED status
+        status = 'UNIFIED',      // Force UNIFIED status
+        dataType = 'RECENT'     // Default to RECENT for new trades (better for learning)
       } = vectorData;
 
-      // Generate unique ID
-      const id = `${entrySignalId}_${Date.now()}`;
+      // CRITICAL: Require timestamp from NinjaTrader - NO server time fallbacks
+      if (!timestamp) {
+        throw new Error('BAR_TIMESTAMP_REQUIRED: All trade data must include timestamp from NinjaTrader bar time');
+      }
+
+      // Generate unique ID using provided timestamp, not server time
+      const timestampMs = new Date(timestamp).getTime();
+      const id = `${entrySignalId}_${timestampMs}`;
       
       // Convert features object to array for vector storage (only for FEATURES and UNIFIED records)
       let featureArray = new Float32Array(100); // Default empty array
@@ -212,6 +235,7 @@ class VectorStore {
         direction: direction || 'unknown',
         timeframeMinutes: timeframeMinutes || 1, // NEW: Store timeframe in minutes
         quantity: quantity || 1, // NEW: Store position size (number of contracts)
+        dataType: (dataType && dataType !== 'undefined') ? dataType : 'RECENT', // Three-state system: TRAINING, RECENT, OUT_OF_SAMPLE (default RECENT for learning)
         // Store ALL features as both array and JSON for flexibility
         features: Array.from(featureArray), // Full feature array for similarity search
         featuresJson: featuresJson, // Features as JSON for analysis
@@ -250,21 +274,40 @@ class VectorStore {
       });
 
       const start = Date.now();
-      try {
-        await this.table.add([record]);
-        const duration = Date.now() - start;
-        
-        console.log(`[VECTOR-STORE] ✅ Successfully stored vector ${id} in ${duration}ms`);
-        
-        return {
-          success: true,
-          vectorId: id,
-          duration,
-          featureCount: featureArray.length
-        };
-      } catch (addError) {
-        console.error('[VECTOR-STORE] ❌ Failed to add record to table:', addError);
-        throw addError;
+      
+      // Retry logic for commit conflicts
+      let retryCount = 0;
+      const maxRetries = 3;
+      
+      while (retryCount <= maxRetries) {
+        try {
+          await this.table.add([record]);
+          const duration = Date.now() - start;
+          
+          console.log(`[VECTOR-STORE] ✅ Successfully stored vector ${id} in ${duration}ms`);
+          
+          return {
+            success: true,
+            vectorId: id,
+            duration,
+            featureCount: featureArray.length
+          };
+          
+        } catch (addError) {
+          retryCount++;
+          
+          // Check if it's a commit conflict that we can retry
+          if (addError.message && addError.message.includes('Commit conflict') && retryCount <= maxRetries) {
+            const delay = Math.pow(2, retryCount) * 100; // Exponential backoff: 200ms, 400ms, 800ms
+            console.warn(`[VECTOR-STORE] ⚠️  Commit conflict (retry ${retryCount}/${maxRetries}) - waiting ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+          
+          // Non-retryable error or max retries exceeded
+          console.error('[VECTOR-STORE] ❌ Failed to add record to table:', addError);
+          throw addError;
+        }
       }
       
     } catch (error) {
@@ -526,7 +569,8 @@ class VectorStore {
         since,
         limit = 100000,
         entryType,
-        timeframeMinutes  // NEW: Filter by timeframe
+        timeframeMinutes,  // NEW: Filter by timeframe
+        dataType  // NEW: Filter by data type (TRAINING, RECENT, OUT_OF_SAMPLE)
       } = options;
 
       // Build filter conditions
@@ -547,6 +591,10 @@ class VectorStore {
       
       if (timeframeMinutes) {
         filters.push(`timeframeMinutes = ${timeframeMinutes}`);
+      }
+      
+      if (dataType) {
+        filters.push(`dataType = '${dataType}'`);
       }
       
       if (since) {
@@ -595,6 +643,7 @@ class VectorStore {
         return {
           totalVectors: 0,
           instrumentCounts: {},
+          instrumentBreakdown: {},
           entryTypeCounts: {},
           outcomeStats: {
             totalWins: 0,
@@ -615,6 +664,7 @@ class VectorStore {
       
       // Group by instrument and entryType
       const instrumentCounts = {};
+      const instrumentBreakdown = {};
       const entryTypeCounts = {};
       const outcomeStats = {
         totalWins: 0,
@@ -630,6 +680,27 @@ class VectorStore {
         // Instrument counts
         instrumentCounts[vector.instrument] = (instrumentCounts[vector.instrument] || 0) + 1;
         
+        // Detailed instrument breakdown
+        if (!instrumentBreakdown[vector.instrument]) {
+          instrumentBreakdown[vector.instrument] = {
+            total: 0,
+            wins: 0,
+            losses: 0,
+            totalPnl: 0,
+            avgPnl: 0,
+            winRate: 0
+          };
+        }
+        
+        instrumentBreakdown[vector.instrument].total++;
+        instrumentBreakdown[vector.instrument].totalPnl += vector.pnl || 0;
+        
+        if (vector.pnl > 0) {
+          instrumentBreakdown[vector.instrument].wins++;
+        } else {
+          instrumentBreakdown[vector.instrument].losses++;
+        }
+        
         // Entry type counts
         entryTypeCounts[vector.entryType] = (entryTypeCounts[vector.entryType] || 0) + 1;
         
@@ -642,6 +713,13 @@ class VectorStore {
         
         totalPnl += vector.pnl;
         totalHoldingBars += vector.holdingBars;
+      });
+      
+      // Calculate averages and win rates for each instrument
+      Object.keys(instrumentBreakdown).forEach(instrument => {
+        const stats = instrumentBreakdown[instrument];
+        stats.avgPnl = stats.total > 0 ? stats.totalPnl / stats.total : 0;
+        stats.winRate = stats.total > 0 ? (stats.wins / stats.total * 100).toFixed(1) : '0.0';
       });
       
       if (totalCount > 0) {
@@ -674,6 +752,7 @@ class VectorStore {
       return {
         totalVectors: totalCount,
         instrumentCounts,
+        instrumentBreakdown,
         entryTypeCounts,
         outcomeStats,
         featureCount: actualFeatureCount,

@@ -49,11 +49,65 @@ class MemoryManager {
 
     async loadAllVectors() {
         const startTime = Date.now();
-        console.log('[MEMORY-MANAGER] Loading all vectors into memory...');
+        console.log('[MEMORY-MANAGER] Loading graduation vectors (TRAINING + RECENT) into memory...');
         
         try {
-            // Get all vectors from storage
-            const allVectors = await this.storageClient.getVectors({ limit: 10000 });
+            // DEBUG: Check what dataType filtering returns
+            console.log('[MEMORY-MANAGER] DEBUG: Attempting to load vectors with dataType filters...');
+            
+            // Get TRAINING vectors
+            const trainingVectors = await this.storageClient.getVectors({ 
+                limit: 10000, 
+                dataType: 'TRAINING' 
+            });
+            console.log(`[MEMORY-MANAGER] DEBUG: TRAINING vectors loaded: ${trainingVectors.length}`);
+            
+            // Get RECENT vectors  
+            const recentVectors = await this.storageClient.getVectors({ 
+                limit: 1000, 
+                dataType: 'RECENT' 
+            });
+            console.log(`[MEMORY-MANAGER] DEBUG: RECENT vectors loaded: ${recentVectors.length}`);
+            
+            // If no vectors found with dataType filter, try loading without it
+            if (trainingVectors.length === 0 && recentVectors.length === 0) {
+                console.log('[MEMORY-MANAGER] DEBUG: No vectors found with dataType filter. Loading ALL vectors...');
+                const allVectorsUnfiltered = await this.storageClient.getVectors({ 
+                    limit: 10000
+                });
+                console.log(`[MEMORY-MANAGER] DEBUG: ALL vectors loaded (no filter): ${allVectorsUnfiltered.length}`);
+                
+                // Check if any vectors have dataType field
+                const vectorsWithDataType = allVectorsUnfiltered.filter(v => v.dataType);
+                console.log(`[MEMORY-MANAGER] DEBUG: Vectors with dataType field: ${vectorsWithDataType.length}`);
+                if (vectorsWithDataType.length > 0) {
+                    console.log('[MEMORY-MANAGER] DEBUG: Sample dataType values:', 
+                        vectorsWithDataType.slice(0, 5).map(v => v.dataType));
+                }
+                
+                // Use all vectors if no dataType filtering works
+                const allVectors = allVectorsUnfiltered;
+                
+                // Clear existing memory
+                this.vectors.clear();
+                this.vectorsByInstrument.clear();
+                
+                // Load into memory structures
+                for (const vector of allVectors) {
+                    this.addVectorToMemory(vector);
+                }
+                
+                this.lastVectorCount = allVectors.length;
+                const duration = Date.now() - startTime;
+                
+                console.log(`[MEMORY-MANAGER] ✅ Loaded ${allVectors.length} vectors (no dataType filter) - Duration: ${duration}ms`);
+                console.log(`[MEMORY-MANAGER] Instruments loaded:`, Array.from(this.vectorsByInstrument.keys()));
+                
+                return;
+            }
+            
+            // Combine for graduation calculations
+            const allVectors = [...trainingVectors, ...recentVectors];
             
             // Clear existing memory
             this.vectors.clear();
@@ -67,7 +121,7 @@ class MemoryManager {
             this.lastVectorCount = allVectors.length;
             const duration = Date.now() - startTime;
             
-            console.log(`[MEMORY-MANAGER] ✅ Loaded ${allVectors.length} vectors into memory - Duration: ${duration}ms`);
+            console.log(`[MEMORY-MANAGER] ✅ Loaded ${trainingVectors.length} training + ${recentVectors.length} recent = ${allVectors.length} vectors for graduation - Duration: ${duration}ms`);
             console.log(`[MEMORY-MANAGER] Instruments loaded:`, Array.from(this.vectorsByInstrument.keys()));
             
         } catch (error) {
@@ -334,9 +388,16 @@ class MemoryManager {
         if (!instrument) return 'UNKNOWN';
         
         // Extract base symbol from contract name
-        // Examples: "MGC AUG25" -> "MGC", "ES SEP25" -> "ES", "NQ DEC24" -> "NQ"
+        // Examples: "MGC AUG25" -> "MGC", "ES SEP25" -> "ES", "NQ DEC24" -> "NQ", "MNQ SEP25" -> "MNQ"
         const parts = instrument.trim().split(/\s+/);
-        return parts[0].toUpperCase();
+        const normalized = parts[0].toUpperCase();
+        
+        // DEBUG: Log normalization for MNQ instruments
+        if (instrument.toUpperCase().includes('MNQ')) {
+            // Removed verbose normalization logging
+        }
+        
+        return normalized;
     }
 
     getVectorsForInstrumentDirection(instrument, direction) {
@@ -347,6 +408,19 @@ class MemoryManager {
         const instrumentVectors = this.vectorsByInstrument.get(normalizedInstrument) || [];
         
         return instrumentVectors.filter(v => v.direction === direction);
+    }
+    
+    getRecentVectorsForInstrumentDirection(instrument, direction) {
+        // Normalize the requested instrument name
+        const normalizedInstrument = this.normalizeInstrumentName(instrument);
+        
+        // Get vectors for normalized instrument, but only RECENT dataType
+        const instrumentVectors = this.vectorsByInstrument.get(normalizedInstrument) || [];
+        
+        return instrumentVectors.filter(v => 
+            v.direction === direction && 
+            (v.dataType === 'RECENT' || !v.dataType) // Include legacy records without dataType
+        );
     }
 
     startBackgroundTasks() {

@@ -159,11 +159,21 @@ app.post('/api/store-vector', async (req, res) => {
     }
 
     // Force UNIFIED for all new records (legacy endpoint)
+    const finalTimestamp = timestamp || req.body.Timestamp;
+    
+    // CRITICAL: Reject any request without proper bar timestamp from NinjaTrader
+    if (!finalTimestamp) {
+      return res.status(400).json({
+        error: 'BAR_TIMESTAMP_REQUIRED',
+        message: 'Timestamp from NinjaTrader bar time is required - no server time fallbacks allowed'
+      });
+    }
+    
     const vectorData = {
       ...req.body,
       recordType: 'UNIFIED',
       status: 'UNIFIED',
-      timestamp: timestamp || req.body.Timestamp || Date.now()  // Handle both cases: timestamp or Timestamp
+      timestamp: finalTimestamp
     };
     
     // Debug log the incoming data
@@ -297,11 +307,21 @@ app.post('/api/store-features', async (req, res) => {
       });
     }
 
+    const finalTimestamp = timestamp || req.body.Timestamp;
+    
+    // CRITICAL: Reject any request without proper bar timestamp from NinjaTrader
+    if (!finalTimestamp) {
+      return res.status(400).json({
+        error: 'BAR_TIMESTAMP_REQUIRED',
+        message: 'Timestamp from NinjaTrader bar time is required - no server time fallbacks allowed'
+      });
+    }
+    
     // Force UNIFIED for all new records (split storage disabled)
     const featureRecord = {
       entrySignalId,
       instrument,
-      timestamp: timestamp || req.body.Timestamp || Date.now(),  // Handle both cases
+      timestamp: finalTimestamp,
       features,
       direction: direction || 'unknown',
       entryType: entryType || 'unknown',
@@ -430,13 +450,23 @@ app.post('/api/store-outcome', async (req, res) => {
       console.log(`❌ [NT-PROFITBYBAR] No profitByBar found in any location for ${entrySignalId}`);
     }
 
+    const finalTimestamp = req.body.timestamp || req.body.Timestamp;
+    
+    // CRITICAL: Reject any request without proper bar timestamp from NinjaTrader
+    if (!finalTimestamp) {
+      return res.status(400).json({
+        error: 'BAR_TIMESTAMP_REQUIRED',
+        message: 'Timestamp from NinjaTrader bar time is required - no server time fallbacks allowed'
+      });
+    }
+    
     // Phase 2: Classify trade importance before storing
     const tradeData = {
       pnl: outcome.pnlDollars || outcome.PnLDollars || 0,
       maxProfit: outcome.maxProfit || 0,
       maxLoss: outcome.maxLoss || 0,
       direction: outcome.direction || req.body.direction,
-      timestamp: req.body.timestamp || req.body.Timestamp || Date.now(),
+      timestamp: finalTimestamp,
       features: req.body.features || outcome.features || {}
     };
     
@@ -601,7 +631,8 @@ app.get('/api/vectors', async (req, res) => {
       instrument, 
       since, 
       limit = 100000,
-      entryType 
+      entryType,
+      dataType 
     } = req.query;
 
     // Get more vectors to account for split storage
@@ -609,7 +640,8 @@ app.get('/api/vectors', async (req, res) => {
       instrument,
       since: since ? new Date(since) : undefined,
       limit: parseInt(limit) * 3, // Get 3x to ensure we have enough after union
-      entryType
+      entryType,
+      dataType
     });
     
     console.log(`[API-VECTORS] Retrieved ${allVectors.length} total vectors`);
@@ -810,6 +842,55 @@ app.post('/api/vectors/delete-bulk-DISABLED', async (req, res) => {
     message: 'This endpoint has been disabled to prevent accidental data loss'
   });
   return;
+
+// NEW: Enabled bulk delete endpoint with safety checks
+app.post('/api/delete-bulk', async (req, res) => {
+  try {
+    const { vectorIds } = req.body;
+    
+    if (!Array.isArray(vectorIds) || vectorIds.length === 0) {
+      return res.status(400).json({
+        error: 'Array of vector IDs is required'
+      });
+    }
+
+    // Safety check: Prevent deletion of too many vectors at once
+    if (vectorIds.length > 50000) {
+      return res.status(400).json({
+        error: `Too many vectors requested for deletion: ${vectorIds.length}. Maximum allowed: 50000`
+      });
+    }
+
+    console.log(`[BULK-DELETE] Starting deletion of ${vectorIds.length} vectors`);
+    
+    const results = await vectorStore.deleteBulkVectors(vectorIds);
+    
+    console.log(`[BULK-DELETE] Completed:`, {
+      requested: vectorIds.length,
+      deleted: results.deletedCount,
+      failed: results.failedCount
+    });
+
+    res.json({
+      success: true,
+      message: 'Bulk deletion completed',
+      deletedCount: results.deletedCount,
+      failedCount: results.failedCount,
+      failedIds: results.failedIds || []
+    });
+
+  } catch (error) {
+    console.error('[BULK-DELETE] Failed:', {
+      error: error.message,
+      requestedCount: req.body.vectorIds?.length || 0
+    });
+
+    res.status(500).json({
+      error: 'Failed to delete vectors in bulk',
+      message: error.message
+    });
+  }
+});
   // Original code below (disabled)
   /*
   try {
@@ -1202,6 +1283,31 @@ async function showStartupStats() {
     console.log(`📈 Total Vectors: ${stats.totalVectors}`);
     console.log(`🎯 Feature Count: ${stats.featureCount}`);
     console.log('');
+    
+    // Show instrument breakdown
+    if (stats.instrumentBreakdown && Object.keys(stats.instrumentBreakdown).length > 0) {
+      console.log('🎯 INSTRUMENT BREAKDOWN');
+      console.log('─'.repeat(80));
+      console.log('Instrument'.padEnd(15) + 'Total'.padEnd(10) + 'Wins'.padEnd(10) + 'Losses'.padEnd(10) + 'Win Rate'.padEnd(12) + 'Avg PnL');
+      console.log('─'.repeat(80));
+      
+      // Sort instruments by total trades (descending)
+      const sortedInstruments = Object.entries(stats.instrumentBreakdown)
+        .sort((a, b) => b[1].total - a[1].total);
+      
+      sortedInstruments.forEach(([instrument, data]) => {
+        console.log(
+          instrument.padEnd(15) +
+          data.total.toString().padEnd(10) +
+          data.wins.toString().padEnd(10) +
+          data.losses.toString().padEnd(10) +
+          (data.winRate + '%').padEnd(12) +
+          '$' + data.avgPnl.toFixed(2)
+        );
+      });
+      
+      console.log('─'.repeat(80));
+    }
     
     // Get actual vectors to analyze features
     const vectors = await vectorStore.getVectors({ limit: stats.totalVectors });
@@ -2047,6 +2153,150 @@ app.get('/api/sessions', async (req, res) => {
       error: 'Failed to get sessions',
       message: error.message
     });
+  }
+});
+
+// =============================================================================
+// LIVE PERFORMANCE TRACKING (OUT_OF_SAMPLE) - JSON FILES
+// =============================================================================
+
+const fs = require('fs').promises;
+const path = require('path');
+
+const LIVE_STATS_FILE = path.join(__dirname, 'data', 'live-stats.json');
+const EQUITY_CURVE_FILE = path.join(__dirname, 'data', 'equity-curve.json');
+
+// Ensure data directory exists
+async function ensureDataDirectory() {
+  const dataDir = path.join(__dirname, 'data');
+  try {
+    await fs.access(dataDir);
+  } catch {
+    await fs.mkdir(dataDir, { recursive: true });
+  }
+}
+
+// Load or initialize JSON files
+async function loadLiveStats() {
+  try {
+    const data = await fs.readFile(LIVE_STATS_FILE, 'utf8');
+    return JSON.parse(data);
+  } catch {
+    return {}; // Return empty object if file doesn't exist
+  }
+}
+
+async function loadEquityCurve() {
+  try {
+    const data = await fs.readFile(EQUITY_CURVE_FILE, 'utf8');
+    return JSON.parse(data);
+  } catch {
+    return []; // Return empty array if file doesn't exist
+  }
+}
+
+async function saveLiveStats(stats) {
+  await ensureDataDirectory();
+  await fs.writeFile(LIVE_STATS_FILE, JSON.stringify(stats, null, 2));
+}
+
+async function saveEquityCurve(curve) {
+  await ensureDataDirectory();
+  await fs.writeFile(EQUITY_CURVE_FILE, JSON.stringify(curve, null, 2));
+}
+
+// OUT_OF_SAMPLE endpoint for live performance tracking
+app.post('/api/live-performance', async (req, res) => {
+  try {
+    const { instrument, entryType, pnl, pnlPerContract, timestamp, exitReason } = req.body;
+    
+    if (!instrument || !entryType || typeof pnl !== 'number') {
+      return res.status(400).json({
+        error: 'Missing required fields: instrument, entryType, pnl'
+      });
+    }
+
+    // Update live stats
+    const stats = await loadLiveStats();
+    const key = `${instrument}_${entryType}`;
+    
+    if (!stats[key]) {
+      stats[key] = {
+        totalTrades: 0,
+        winRate: 0.0,
+        totalPnL: 0.0,
+        totalWins: 0,
+        totalLosses: 0,
+        lastTrade: null
+      };
+    }
+
+    // Update aggregated stats
+    const isWin = (pnlPerContract || pnl) > 0;
+    stats[key].totalTrades += 1;
+    stats[key].totalPnL += (pnlPerContract || pnl);
+    stats[key].lastTrade = timestamp || new Date().toISOString();
+    
+    if (isWin) {
+      stats[key].totalWins += 1;
+    } else {
+      stats[key].totalLosses += 1;
+    }
+    
+    stats[key].winRate = stats[key].totalWins / stats[key].totalTrades;
+
+    // Update equity curve
+    const curve = await loadEquityCurve();
+    const currentTotal = curve.length > 0 ? curve[curve.length - 1].runningPnL : 0;
+    const newTotal = currentTotal + (pnlPerContract || pnl);
+    
+    curve.push({
+      timestamp: timestamp || new Date().toISOString(),
+      runningPnL: newTotal,
+      tradeCount: curve.length + 1
+    });
+
+    // Save both files
+    await saveLiveStats(stats);
+    await saveEquityCurve(curve);
+
+    log(`📊 Live performance updated: ${key}, PnL: ${pnlPerContract || pnl}, Running Total: ${newTotal}`);
+
+    res.json({
+      success: true,
+      updated: key,
+      newStats: stats[key],
+      runningTotal: newTotal
+    });
+
+  } catch (error) {
+    console.error('Failed to store live performance:', error);
+    res.status(500).json({
+      error: 'Failed to store live performance',
+      message: error.message
+    });
+  }
+});
+
+// Get live performance stats
+app.get('/api/live-performance/stats', async (req, res) => {
+  try {
+    const stats = await loadLiveStats();
+    res.json({ success: true, stats });
+  } catch (error) {
+    console.error('Failed to get live stats:', error);
+    res.status(500).json({ error: 'Failed to get live stats' });
+  }
+});
+
+// Get equity curve
+app.get('/api/live-performance/equity-curve', async (req, res) => {
+  try {
+    const curve = await loadEquityCurve();
+    res.json({ success: true, curve });
+  } catch (error) {
+    console.error('Failed to get equity curve:', error);
+    res.status(500).json({ error: 'Failed to get equity curve' });
   }
 });
 
