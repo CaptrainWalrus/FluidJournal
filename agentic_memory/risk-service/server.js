@@ -2,10 +2,9 @@ require('dotenv').config();
 const express = require('express');
 const AgenticMemoryClient = require('../shared/agenticMemoryClient');
 const MemoryManager = require('./memoryManager');
-const GPIntegration = require('./gpIntegration');
+const FluidRiskModel = require('./fluidRiskModel');
 const ConfidenceEngine = require('./confidenceEngine');
 const ABTestingFramework = require('./abTesting');
-const OnlineLearning = require('./onlineLearning');
 const PrunedRangesEngine = require('./prunedRangesEngine');
 const RobustZoneEngine = require('./robustZoneEngine');
 const app = express();
@@ -18,15 +17,12 @@ app.use(express.json());
 const memoryManager = new MemoryManager();
 const storageClient = new AgenticMemoryClient(); // Keep for backward compatibility
 
-// Initialize GP Integration
-const gpIntegration = new GPIntegration();
+// Initialize Fluid Risk Model
+const fluidRiskModel = new FluidRiskModel(memoryManager);
 const confidenceEngine = new ConfidenceEngine();
 
 // Initialize A/B Testing (if enabled)
 const abTesting = process.env.ENABLE_AB_TESTING === 'true' ? new ABTestingFramework() : null;
-
-// Initialize Online Learning
-const onlineLearning = new OnlineLearning(gpIntegration, confidenceEngine, abTesting);
 
 // Initialize Pruned Ranges Engine (legacy)
 const prunedRangesEngine = new PrunedRangesEngine();
@@ -34,16 +30,20 @@ const prunedRangesEngine = new PrunedRangesEngine();
 // Initialize Robust Zone Engine (new implementation)
 const robustZoneEngine = new RobustZoneEngine();
 
+// Initialize Decision Analysis Monitor
+const DecisionAnalysisMonitor = require('./decisionAnalysisMonitor');
+const decisionMonitor = new DecisionAnalysisMonitor();
+
 // Initialize Risk Variation Strategy for backtesting
 const RiskVariationStrategy = require('../risk-variation-strategy');
 const riskVariation = new RiskVariationStrategy();
 
 // Configuration
 const CONFIG = {
-    ENABLE_GP_INTEGRATION: process.env.ENABLE_GP_INTEGRATION !== 'false',
+    // ENABLE_GP_INTEGRATION: process.env.ENABLE_GP_INTEGRATION !== 'false', // GP SYSTEM DISABLED
     ENABLE_AB_TESTING: process.env.ENABLE_AB_TESTING === 'true',
     ENABLE_PRUNED_RANGES: process.env.ENABLE_PRUNED_RANGES === 'true',
-    ENABLE_ROBUST_ZONES: process.env.ENABLE_ROBUST_ZONES !== 'false', // Default to true
+    ENABLE_ROBUST_ZONES: process.env.ENABLE_ROBUST_ZONES === 'true', // Disable by default, use FluidRiskModel
     BACKTEST_MODE: process.env.BACKTEST_MODE === 'true',
     
     // Minimum similar patterns to provide recommendations (relaxed for learning)
@@ -487,6 +487,85 @@ const STATS_CACHE_TTL = 30000; // 30 seconds cache
 
 // Duplicate CONFIG removed - using the one defined earlier in the file
 
+// Record actual trade outcome for self-correction learning
+app.post('/api/record-trade-outcome', async (req, res) => {
+    try {
+        const { entrySignalId, pnlPerContract, exitReason, maxProfit, maxLoss } = req.body;
+        
+        if (!entrySignalId || pnlPerContract === undefined) {
+            return res.status(400).json({
+                error: 'Missing required fields: entrySignalId and pnlPerContract'
+            });
+        }
+        
+        // Get the stored evaluation context
+        const evaluationContext = global.pendingEvaluations?.get(entrySignalId);
+        if (!evaluationContext) {
+            console.log(`[TRADE-OUTCOME] No evaluation context found for ${entrySignalId} - skipping outcome recording`);
+            return res.json({ 
+                success: false, 
+                message: 'No evaluation context found for this trade' 
+            });
+        }
+        
+        // Record the outcome in robust zones engine for self-correction
+        if (CONFIG.ENABLE_ROBUST_ZONES && robustZoneEngine) {
+            const performance = robustZoneEngine.recordTradeOutcome(
+                evaluationContext.instrument,
+                evaluationContext.direction,
+                evaluationContext.entryType,
+                pnlPerContract,
+                evaluationContext.confidence,
+                evaluationContext.membership
+            );
+            
+            console.log(`[TRADE-OUTCOME] Recorded ${entrySignalId}: PnL $${pnlPerContract} for ${evaluationContext.instrument}_${evaluationContext.direction}_${evaluationContext.entryType}`);
+            
+            // DECISION MONITORING: Record outcome for decision analysis (non-blocking)
+            try {
+                decisionMonitor.recordOutcome(entrySignalId, {
+                    pnlPerContract: pnlPerContract,
+                    pnl: pnlPerContract, // Backup field
+                    exitReason: exitReason || 'unknown',
+                    maxProfit: maxProfit || 0,
+                    maxLoss: maxLoss || 0,
+                    actualSL: req.body.actualSL,
+                    actualTP: req.body.actualTP,
+                    barsHeld: req.body.barsHeld || 0
+                });
+            } catch (error) {
+                // Don't block trade processing if monitoring fails
+                console.log(`[DECISION-MONITOR] Outcome recording failed: ${error.message}`);
+            }
+            
+            // Clean up evaluation context
+            global.pendingEvaluations.delete(entrySignalId);
+            
+            return res.json({
+                success: true,
+                performance: {
+                    consecutiveLosses: performance.consecutiveLosses,
+                    consecutiveWins: performance.consecutiveWins,
+                    totalPnL: performance.totalPnL,
+                    tradeCount: performance.trades.length
+                }
+            });
+        } else {
+            return res.json({
+                success: false,
+                message: 'Robust zones engine not enabled'
+            });
+        }
+        
+    } catch (error) {
+        console.error('[TRADE-OUTCOME] Error recording trade outcome:', error.message);
+        res.status(500).json({
+            error: 'Failed to record trade outcome',
+            details: error.message
+        });
+    }
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
     res.json({ 
@@ -551,6 +630,44 @@ app.post('/api/graduation/update', async (req, res) => {
     }
 });
 
+// Decision Analysis endpoints
+app.get('/api/decision-analysis', (req, res) => {
+    try {
+        const { instrument, hours } = req.query;
+        const stats = decisionMonitor.getDecisionStats(
+            instrument || null, 
+            parseInt(hours) || 24
+        );
+        
+        res.json({
+            success: true,
+            stats: stats,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Manual decision analysis trigger
+app.post('/api/decision-analysis/analyze', async (req, res) => {
+    try {
+        await decisionMonitor.performPeriodicAnalysis();
+        res.json({
+            success: true,
+            message: 'Decision analysis completed'
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 // Main signal approval endpoint (compatible with existing NT integration)
 app.post('/api/approve-signal', async (req, res) => {
     const startTime = Date.now();
@@ -564,6 +681,45 @@ app.post('/api/approve-signal', async (req, res) => {
         } = req.body;
 
         console.log(`[RISK-SERVICE] Signal approval request: ${direction} ${instrument} @ ${entry_price}`);
+        
+        // FAST RECOVERY CHECK: Only analyze if we suspect issues (non-blocking)
+        setImmediate(async () => {
+            try {
+                // Background recovery analysis - doesn't block trading decisions
+                const recentTrades = await storageClient.getVectors({ 
+                    instrument: instrument, 
+                    direction: direction, 
+                    limit: 5 // Reduced from 15 for speed
+                });
+                
+                if (recentTrades && recentTrades.length >= 3) {
+                    // Quick recovery check
+                    const recentLosses = recentTrades.filter(t => (t.pnlPerContract || t.pnl) < -10).length;
+                    const consecutiveLosses = countConsecutiveLosses(recentTrades);
+                    
+                    // Only show recovery mode if there's a real issue
+                    if (consecutiveLosses >= 3 || recentLosses >= 4) {
+                        let cumulativePnL = 0;
+                        const equityCurve = recentTrades
+                            .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+                            .map(trade => {
+                                cumulativePnL += (trade.pnlPerContract || trade.pnl || 0);
+                                return cumulativePnL;
+                            });
+                        
+                        const currentPnL = equityCurve[equityCurve.length - 1];
+                        const winRate = ((recentTrades.length - recentLosses) / recentTrades.length) * 100;
+                        const recoveryStatus = getRecoveryStatus(currentPnL, 0, consecutiveLosses, winRate);
+                        
+                        console.log(`🚨 [RECOVERY-MODE] ${direction} ${instrument} @ ${entry_price}`);
+                        console.log(`   💰 Equity: $${currentPnL.toFixed(0)} | Losses: ${consecutiveLosses} consecutive | Win Rate: ${winRate.toFixed(0)}%`);
+                        console.log(`   🎯 Strategy: ${recoveryStatus.strategy} | Priority: ${recoveryStatus.priority}`);
+                    }
+                }
+            } catch (error) {
+                // Silently fail - don't log errors for background task
+            }
+        });
         
         // Get current features from ME (single source of truth)
         let features;
@@ -741,10 +897,14 @@ app.post('/api/approve-signal', async (req, res) => {
 // FAST: Memory-based recent trade analysis (no storage queries)
 function analyzeRecentTradesFromMemory(instrument, direction, timestamp, limit = 10) {
     try {
-        console.log(`[RECENT-TRADES-MEMORY] Analyzing last ${limit} trades for ${instrument} from memory`);
-        
         // Get RECENT trades only from memory manager (not TRAINING data)
         const vectors = memoryManager.getRecentVectorsForInstrumentDirection(instrument, direction);
+        
+        // Only log recent trades analysis in recovery situations
+        const hasRecentLosses = vectors.some(v => (v.pnlPerContract || v.pnl) < -20);
+        if (hasRecentLosses) {
+            console.log(`[RECENT-TRADES-MEMORY] Analyzing last ${limit} trades for ${instrument} from memory (recovery mode)`);
+        }
         
         if (vectors.length === 0) {
             return {
@@ -761,21 +921,30 @@ function analyzeRecentTradesFromMemory(instrument, direction, timestamp, limit =
         const lookbackHours = 24;
         const lookbackTime = new Date(currentTime.getTime() - (lookbackHours * 60 * 60 * 1000));
         
-        // DEBUG: Check timestamp alignment and dataType filtering
-        const allVectors = memoryManager.getVectorsForInstrumentDirection(instrument, direction);
-        console.log(`[DATATYPE-DEBUG] Total vectors: ${allVectors.length}, RECENT vectors: ${vectors.length}`);
+        // Only show debug info when NOT in recovery mode to keep recovery logs clean
+        const isRecoveryMode = vectors.some(v => (v.pnlPerContract || v.pnl) < -20);
         
-        if (vectors.length > 0) {
-            const sampleTrade = vectors[0];
-            console.log(`[TIMESTAMP-DEBUG] Query time: ${currentTime.toISOString()}`);
-            console.log(`[TIMESTAMP-DEBUG] Lookback: ${lookbackTime.toISOString()}`);
-            console.log(`[TIMESTAMP-DEBUG] Sample RECENT trade time: ${new Date(sampleTrade.timestamp).toISOString()}`);
-            console.log(`[DATATYPE-DEBUG] Sample RECENT trade dataType: ${sampleTrade.dataType}`);
-        }
-        
-        if (allVectors.length > 0) {
-            const dataTypes = [...new Set(allVectors.map(v => v.dataType || 'undefined'))];
-            console.log(`[DATATYPE-DEBUG] Available dataTypes: ${dataTypes.join(', ')}`);
+        if (!isRecoveryMode) {
+            // DEBUG: Check timestamp alignment and dataType filtering
+            const allVectors = memoryManager.getVectorsForInstrumentDirection(instrument, direction);
+            console.log(`[DATATYPE-DEBUG] Total vectors: ${allVectors.length}, RECENT vectors: ${vectors.length}`);
+            
+            if (vectors.length > 0) {
+                const sampleTrade = vectors[0];
+                console.log(`[TIMESTAMP-DEBUG] Query time: ${currentTime.toISOString()}`);
+                console.log(`[TIMESTAMP-DEBUG] Lookback: ${lookbackTime.toISOString()}`);
+                console.log(`[TIMESTAMP-DEBUG] Sample RECENT trade time: ${new Date(sampleTrade.timestamp).toISOString()}`);
+                console.log(`[DATATYPE-DEBUG] Sample RECENT trade dataType: ${sampleTrade.dataType}`);
+            }
+            
+            if (allVectors.length > 0) {
+                const dataTypes = [...new Set(allVectors.map(v => v.dataType || 'undefined'))];
+                console.log(`[DATATYPE-DEBUG] Available dataTypes: ${dataTypes.join(', ')}`);
+            }
+        } else {
+            // In recovery mode - show simplified data info
+            const allVectors = memoryManager.getVectorsForInstrumentDirection(instrument, direction);
+            console.log(`[RECOVERY-DATA] ${vectors.length} recent trades from ${allVectors.length} total for recovery analysis`);
         }
         
         let recentTrades;
@@ -1187,342 +1356,40 @@ async function calculateAgenticRisk(instrument, direction, features, timestamp, 
     
     // EARLY EXIT: Skip everything if no memory manager
     if (!memoryManager.isInitialized) {
-        console.log('[AGENTIC-RISK] Memory not initialized - instant rule-based');
+        console.log('[AGENTIC-RISK] Memory not initialized - using rule-based');
         return calculateRuleBasedRisk(features, direction, maxStopLoss, maxTakeProfit);
     }
     
     // EARLY EXIT: Check if we have ANY data for this instrument
     const vectorCount = memoryManager.getVectorsForInstrumentDirection(instrument, direction).length;
     if (vectorCount === 0) {
-        console.log(`[AGENTIC-RISK] No data for ${instrument}_${direction} - instant rule-based (0ms check)`);
+        console.log(`[AGENTIC-RISK] No data for ${instrument}_${direction} - using rule-based`);
         return calculateRuleBasedRisk(features, direction, maxStopLoss, maxTakeProfit);
     }
     
     try {
-        // SUBSTAGE 2A: Try Trade Approval Risk Manager first (the robot)
-        const stage2aStart = Date.now();
-        const heatMapDecision = tradeApprovalManager.evaluateTradeApproval(features, direction);
-        const stage2aDuration = Date.now() - stage2aStart;
-        console.log(`[AGENTIC-RISK] SUBSTAGE2A-HEATMAP: Heat map evaluation - Duration: ${stage2aDuration}ms`);
+        // NEW: Use Fluid Risk Model for continuous probability-based evaluation
+        console.log(`[AGENTIC-RISK] Using Fluid Risk Model for ${instrument}_${direction}`);
+        const fluidResult = await fluidRiskModel.evaluateRisk(instrument, direction, features, timestamp);
         
-        if (heatMapDecision) {
-            console.log(`[AGENTIC-RISK] Using heat map decision: ${heatMapDecision.method}`);
-            const totalDuration = Date.now() - agenticStartTime;
-            console.log(`[AGENTIC-RISK] COMPLETED (heat map) - Total duration: ${totalDuration}ms`);
-            return heatMapDecision;
+        // Apply any maxStopLoss/maxTakeProfit constraints if provided
+        if (maxStopLoss && fluidResult.suggested_sl > maxStopLoss) {
+            fluidResult.suggested_sl = maxStopLoss;
+            fluidResult.reasons.push(`Stop loss capped at ${maxStopLoss}`);
         }
-
-        // SUBSTAGE 2B: Fall back to original agentic memory logic if no heat map match
-        console.log(`[AGENTIC-RISK] No heat map match, using graduated feature similarity`);
-        
-        // OPTIMIZATION: Skip expensive recent trade analysis if we'll have no patterns anyway
-        // First get basic pattern count to decide if analysis is worth it
-        const quickPatternCheck = memoryManager.findSimilarPatterns(features, instrument, direction, 1);
-        let recentPerformance = null;
-        
-        if (quickPatternCheck.length > 0) {
-            // Only analyze recent trades if we have patterns to work with
-            recentPerformance = await analyzeRecentTrades(instrument, direction, timestamp, 5);
-        } else {
-            console.log(`[AGENTIC-RISK] Skipping recent trade analysis - no similar patterns found`);
+        if (maxTakeProfit && fluidResult.suggested_tp > maxTakeProfit) {
+            fluidResult.suggested_tp = maxTakeProfit;
+            fluidResult.reasons.push(`Take profit capped at ${maxTakeProfit}`);
         }
         
-        // Don't reject early - let the main logic handle risk adjustments
-        // We want to adapt risk parameters, not blindly reject
-        
-        // SUBSTAGE 2B: Get instrument+direction specific graduation
-        const stage2bStart = Date.now();
-        const graduation = graduationManager.getGraduation(instrument, direction);
-        
-        // Check if graduated features need updating for this specific context
-        // PHASE 1 OPTIMIZATION: Skip updates in backtest mode for speed
-        if (!CONFIG.BACKTEST_MODE && graduation.shouldUpdateGraduation()) {
-            console.log(`[GRADUATION] Auto-updating ${instrument}_${direction} features...`);
-            await graduation.updateGraduatedFeatures();
-        } else if (CONFIG.BACKTEST_MODE && graduation.shouldUpdateGraduation()) {
-            console.log(`[GRADUATION] Skipping update in backtest mode for speed`);
-        }
-        
-        // Extract only graduated features for similarity matching
-        const graduatedFeatures = graduation.extractGraduatedFeatures(features);
-        const graduatedList = graduation.getGraduatedFeatures();
-        const stage2bDuration = Date.now() - stage2bStart;
-        console.log(`[AGENTIC-RISK] SUBSTAGE2B-GRADUATION: Feature graduation - Duration: ${stage2bDuration}ms`);
-        
-        console.log(`[AGENTIC-RISK] Using ${graduatedList.length} graduated features for matching`);
-        console.log(`[AGENTIC-RISK] Graduated features:`, graduatedList.slice(0, 5), '...');
-        
-        // Debug: Show graduation info
-        if (graduatedFeatures._graduation_info) {
-            const info = graduatedFeatures._graduation_info;
-            console.log(`[GRADUATION] Info: ${info.graduated_count}/${info.total_available} features, missing: ${info.missing_features.length}`);
-            if (info.missing_features.length > 0) {
-                console.log(`[GRADUATION] Missing features:`, info.missing_features.slice(0, 3));
-            }
-        }
-        
-        // SUBSTAGE 2C: Use graduated features for smart similarity matching
-        console.log(`[AGENTIC-RISK] Using graduated features for similarity search`);
-        console.log(`[AGENTIC-RISK] Graduated features:`, graduatedList);
-        const queryValues = graduatedList.map(f => graduatedFeatures[f]);
-        console.log(`[AGENTIC-RISK] Query values:`, queryValues);
-        
-        // PERFORMANCE: Skip expensive similarity search if most features are undefined
-        const validFeatures = queryValues.filter(v => v !== undefined && v !== null).length;
-        const featureCompleteness = validFeatures / queryValues.length;
-        
-        if (featureCompleteness < 0.3) { // Less than 30% features available
-            console.log(`[AGENTIC-RISK] SKIPPING similarity search - insufficient features (${validFeatures}/${queryValues.length} = ${(featureCompleteness*100).toFixed(1)}%)`);
-            console.log(`[AGENTIC-RISK] COMPLETED (fallback to rule-based - insufficient features) - Total duration: ${Date.now() - agenticStartTime}ms`);
-            return calculateRuleBasedRisk(features, direction, maxStopLoss, maxTakeProfit);
-        }
-        
-        // Find similar historical patterns using graduated feature similarity
-        const stage2cStart = Date.now();
-        let similarPatterns;
-        
-        if (memoryManager.isInitialized) {
-            // Use fast in-memory similarity search
-            similarPatterns = memoryManager.findSimilarPatterns(features, instrument, direction, 25);
-            console.log(`[AGENTIC-RISK] Using MEMORY-based similarity search`);
-        } else {
-            // Fallback to slower storage-based search
-            similarPatterns = await storageClient.querySimilar(graduatedFeatures, {
-                instrument: instrument,
-                limit: 25,
-                similarity_threshold: CONFIG.SIMILARITY_THRESHOLD,
-                graduatedFeatures: graduatedList
-            });
-            console.log(`[AGENTIC-RISK] Using STORAGE-based similarity search (fallback)`);
-        }
-        const stage2cDuration = Date.now() - stage2cStart;
-
-        // Removed verbose substage duration logging
-        console.log(`[AGENTIC-RISK] Similarity search params: instrument=${instrument}, limit=25, threshold=${CONFIG.SIMILARITY_THRESHOLD}`);
-        console.log(`[AGENTIC-RISK] Found ${similarPatterns.length} similar patterns for ${instrument}`);
-        
-        if (similarPatterns.length > 0) {
-            console.log(`[AGENTIC-RISK] Sample pattern directions:`, similarPatterns.slice(0, 3).map(p => ({ 
-                id: p.entrySignalId, 
-                direction: p.direction, 
-                pnl: p.pnl, 
-                wasGoodExit: p.wasGoodExit,
-                distance: p._distance
-            })));
-        }
-
-        if (similarPatterns.length < CONFIG.MIN_SIMILAR_PATTERNS) {
-            console.log(`[AGENTIC-RISK] COMPLETED (fallback to rule-based - insufficient patterns: ${similarPatterns.length}) - Total duration: ${Date.now() - agenticStartTime}ms`);
-            return calculateRuleBasedRisk(features, direction, maxStopLoss, maxTakeProfit);
-        }
-
-        // OPPOSITE DIRECTION CHECK: Find patterns that succeeded in OPPOSITE direction
-        const oppositeDirection = direction === 'long' ? 'short' : 'long';
-        
-        // Filter for patterns in the OPPOSITE direction that were successful
-        const oppositeSuccessPatterns = similarPatterns.filter(pattern => {
-            const isOpposite = pattern.direction === oppositeDirection;
-            const wasSuccessful = pattern.wasGoodExit && (pattern.pnl || 0) > 10; // Significant profit
-            return isOpposite && wasSuccessful;
-        });
-        
-        // Filter for patterns in the SAME direction
-        const sameDirectionPatterns = similarPatterns.filter(pattern => {
-            return pattern.direction === direction;
-        });
-        
-        // Check for OVERWHELMING opposite direction evidence (more restrictive threshold)
-        if (oppositeSuccessPatterns.length >= 5 && oppositeSuccessPatterns.length > (sameDirectionPatterns.length * 2)) {
-            console.log(`[AGENTIC-RISK] REJECTING - OVERWHELMING opposite direction evidence`);
-            console.log(`[AGENTIC-RISK] Found ${oppositeSuccessPatterns.length} successful ${oppositeDirection} patterns vs ${sameDirectionPatterns.length} ${direction} patterns`);
-            
-            const avgOppositeProfit = oppositeSuccessPatterns.reduce((sum, p) => sum + (p.pnl || 0), 0) / oppositeSuccessPatterns.length;
-            
-            // Build detailed reasoning for opposite direction
-            let detailedReason = `Overwhelming evidence suggests ${oppositeDirection.toUpperCase()} trades are strongly favored. `;
-            detailedReason += `Found ${oppositeSuccessPatterns.length} successful ${oppositeDirection} trades averaging $${avgOppositeProfit.toFixed(0)} profit `;
-            detailedReason += `versus only ${sameDirectionPatterns.length} ${direction} patterns. `;
-            detailedReason += `Strong recommendation: Wait for a ${oppositeDirection} setup to align with market structure.`;
-            
-            return {
-                confidence: 0.1, // Very low confidence = STRONG REJECTION
-                stopLoss: CONFIG.DEFAULT_RISK.stopLoss * 2, // Wide stop if they insist
-                takeProfit: CONFIG.DEFAULT_RISK.takeProfit * 0.5, // Small target
-                reasoning: detailedReason,
-                method: 'opposite_direction_rejection',
-                patternsUsed: oppositeSuccessPatterns.length,
-                graduatedFeatureCount: graduatedList.length,
-                rejectionReason: 'overwhelming_opposite_direction',
-                technicalDetails: `${oppositeSuccessPatterns.length} ${oppositeDirection} winners vs ${sameDirectionPatterns.length} ${direction} patterns`,
-                similarPatterns: oppositeSuccessPatterns // Include patterns for recPullback calculation
-            };
-        } else if (oppositeSuccessPatterns.length >= 3 && oppositeSuccessPatterns.length > sameDirectionPatterns.length) {
-            // MODERATE opposite direction evidence - proceed with caution but don't reject
-            console.log(`[AGENTIC-RISK] PROCEEDING with caution - moderate opposite direction bias detected`);
-            
-            const avgOppositeProfit = oppositeSuccessPatterns.reduce((sum, p) => sum + (p.pnl || 0), 0) / oppositeSuccessPatterns.length;
-            
-            let detailedReason = `Proceeding with extra caution for this ${direction} setup. `;
-            detailedReason += `Market shows some bias toward ${oppositeDirection} (${oppositeSuccessPatterns.length} vs ${sameDirectionPatterns.length} patterns), `;
-            detailedReason += `but not overwhelming enough to reject. Using conservative risk parameters.`;
-            
-            return {
-                confidence: 0.52, // Just above threshold = APPROVED but very cautious
-                stopLoss: CONFIG.DEFAULT_RISK.stopLoss, 
-                takeProfit: Math.round(CONFIG.DEFAULT_RISK.takeProfit * 0.7), // Smaller target due to bias
-                reasoning: detailedReason,
-                method: 'agentic_memory_cautious',
-                patternsUsed: oppositeSuccessPatterns.length + sameDirectionPatterns.length,
-                graduatedFeatureCount: graduatedList.length,
-                riskAdjustment: 'conservative_due_to_direction_bias',
-                similarPatterns: [...oppositeSuccessPatterns, ...sameDirectionPatterns] // Include patterns for recPullback calculation
-            };
-        }
-
-        // Original logic for same direction patterns
-        // Identify LOSING patterns in same direction (using normalized per-contract values)
-        const losingPatterns = sameDirectionPatterns.filter(pattern => {
-            const pnlPerContract = pattern.pnlPerContract || pattern.pnl || 0;
-            const badExit = !pattern.wasGoodExit && pnlPerContract < -10; // Significant losses per contract
-            const stopLossHit = pattern.exitReason === 'STOP_LOSS' || pattern.exitReason === 'SL';
-            return badExit || stopLossHit;
-        });
-
-        // Identify WINNING patterns in same direction (using normalized per-contract values)
-        const winningPatterns = sameDirectionPatterns.filter(pattern => {
-            const pnlPerContract = pattern.pnlPerContract || pattern.pnl || 0;
-            return pattern.wasGoodExit && pnlPerContract > 5; // Good profits per contract
-        });
-
-        console.log(`[AGENTIC-RISK] Direction analysis:`, {
-            oppositeSuccess: oppositeSuccessPatterns.length,
-            sameDirection: sameDirectionPatterns.length,
-            losing: losingPatterns.length,
-            winning: winningPatterns.length
-        });
-
-        // DETAILED FAILURE ANALYSIS: What went wrong with losing patterns?
-        if (losingPatterns.length > 0) {
-            const failureAnalysis = analyzeFailurePatterns(losingPatterns, graduatedList);
-            console.log(`[AGENTIC-RISK] Failure Analysis:`, failureAnalysis);
-        }
-
-        // LEARNING-FIRST LOGIC: Only reject if overwhelming evidence of LARGE losses
-        if (losingPatterns.length >= 3) {
-            const riskAnalysis = analyzePatternRisk(losingPatterns);
-            
-            // Calculate average loss from losing patterns (using normalized values)
-            const avgLoss = losingPatterns.reduce((sum, p) => sum + Math.abs(p.pnlPerContract || p.pnl || 0), 0) / losingPatterns.length;
-            const stopLossReasons = losingPatterns.filter(p => p.exitReason === 'STOP_LOSS' || p.exitReason === 'SL').length;
-            
-            // Stricter rejection: lower loss threshold and fewer patterns required
-            if (avgLoss > 40 && stopLossReasons >= 1 && losingPatterns.length >= 3) {
-                console.log(`[AGENTIC-RISK] REJECTING signal - ${losingPatterns.length} patterns with large losses (avg $${avgLoss.toFixed(0)})`);
-                
-                let detailedReason = `High risk of significant loss detected for this ${direction} setup. `;
-                detailedReason += `Found ${losingPatterns.length} similar patterns averaging $${avgLoss.toFixed(0)} losses with ${stopLossReasons} stop losses hit. `;
-                detailedReason += `Recommend waiting for better setup to preserve capital.`;
-                
-                return {
-                    confidence: 0.2, // Low confidence = REJECTION
-                    stopLoss: riskAnalysis.optimalSL,
-                    takeProfit: riskAnalysis.optimalTP,
-                    reasoning: detailedReason,
-                    method: 'agentic_memory_rejection',
-                    patternsUsed: losingPatterns.length,
-                    graduatedFeatureCount: graduatedList.length,
-                    rejectionReason: 'high_risk_large_losses',
-                    technicalDetails: `${losingPatterns.length} losing patterns, avg loss $${avgLoss.toFixed(0)}`,
-                    similarPatterns: losingPatterns // Include patterns for recPullback calculation
-                };
-            } else {
-                // PROCEED WITH CAUTION: Adjust risk but don't reject
-                console.log(`[AGENTIC-RISK] PROCEEDING with adjusted risk - ${losingPatterns.length} patterns, avg loss $${avgLoss.toFixed(0)} (not severe enough to reject)`);
-                
-                // Get detailed failure analysis
-                const failureAnalysis = analyzeFailurePatterns(losingPatterns, graduatedList);
-                
-                // Tighten stops based on historical losses but still proceed
-                const adjustedSL = Math.min(avgLoss * 0.7 / 10, riskAnalysis.optimalSL); // 70% of avg loss converted to points
-                const adjustedTP = Math.max(adjustedSL * 1.5, 8); // At least 1.5:1 R/R
-                
-                let detailedReason = `Proceeding with caution for this ${direction} setup. `;
-                detailedReason += `Found ${losingPatterns.length} similar patterns with avg $${avgLoss.toFixed(0)} losses, but not severe enough to reject. `;
-                
-                // Add specific failure insights
-                if (failureAnalysis.recommendations.length > 0) {
-                    detailedReason += `Key insight: ${failureAnalysis.recommendations[0]}. `;
-                }
-                
-                detailedReason += `Adjusted to tighter risk: SL ${Math.round(adjustedSL)} points, TP ${Math.round(adjustedTP)} points for protection.`;
-                
-                return {
-                    confidence: 0.55, // Above threshold = APPROVED but cautious
-                    stopLoss: Math.round(adjustedSL),
-                    takeProfit: Math.round(adjustedTP),
-                    reasoning: detailedReason,
-                    method: 'agentic_memory_adjusted',
-                    patternsUsed: losingPatterns.length,
-                    graduatedFeatureCount: graduatedList.length,
-                    riskAdjustment: 'tightened_for_protection',
-                    failureAnalysis: failureAnalysis.recommendations,
-                    similarPatterns: losingPatterns // Include patterns for recPullback calculation
-                };
-            }
-        }
-
-        // If we have winning patterns, BOOST confidence
-        if (winningPatterns.length >= 2) {
-            console.log(`[AGENTIC-RISK] BOOSTING confidence - ${winningPatterns.length} similar winning patterns found`);
-            const riskAnalysis = analyzePatternRisk(winningPatterns);
-            
-            // Analyze what made these patterns successful
-            const successAnalysis = analyzeSuccessPatterns(winningPatterns, graduatedList);
-            console.log(`[AGENTIC-RISK] Success Analysis:`, successAnalysis);
-            
-            // Calculate average win from winning patterns (using normalized values)
-            const avgWin = winningPatterns.reduce((sum, p) => sum + (p.pnlPerContract || p.pnl || 0), 0) / winningPatterns.length;
-            const successRate = (winningPatterns.length / sameDirectionPatterns.length * 100).toFixed(0);
-            
-            // Build detailed reasoning for approval
-            let detailedReason = `Favorable setup detected for this ${direction} trade. `;
-            detailedReason += `Found ${winningPatterns.length} similar winning patterns averaging $${avgWin.toFixed(0)} profit. `;
-            detailedReason += `Historical success rate: ${successRate}% for similar market conditions. `;
-            
-            // Add specific success insights
-            if (successAnalysis.keyStrengths.length > 0) {
-                detailedReason += `Key strength: ${successAnalysis.keyStrengths[0]}. `;
-            }
-            
-            detailedReason += `Recommended SL: ${riskAnalysis.optimalSL} points, TP: ${riskAnalysis.optimalTP} points for optimal risk/reward.`;
-            
-            const totalDuration = Date.now() - agenticStartTime;
-            console.log(`[AGENTIC-RISK] COMPLETED (approved) - Total duration: ${totalDuration}ms`);
-            
-            return {
-                confidence: 0.8, // High confidence = STRONG APPROVAL
-                stopLoss: riskAnalysis.optimalSL,
-                takeProfit: riskAnalysis.optimalTP,
-                reasoning: detailedReason,
-                method: 'agentic_memory_approval',
-                patternsUsed: winningPatterns.length,
-                graduatedFeatureCount: graduatedList.length,
-                successRate: riskAnalysis.successRate,
-                technicalDetails: `${winningPatterns.length} winning patterns with ${graduatedList.length} graduated features`,
-                successAnalysis: successAnalysis.keyStrengths,
-                similarPatterns: winningPatterns // Include patterns for recPullback calculation
-            };
-        }
-
-        // If insufficient patterns for strong decision, use rule-based with moderate confidence
-        console.log(`[AGENTIC-RISK] Insufficient strong patterns, using rule-based with moderate confidence`);
         const totalDuration = Date.now() - agenticStartTime;
-        console.log(`[AGENTIC-RISK] COMPLETED (fallback to rule-based) - Total duration: ${totalDuration}ms`);
-        return calculateRuleBasedRisk(features, direction, maxStopLoss, maxTakeProfit);
-
+        console.log(`[AGENTIC-RISK] COMPLETED (fluid model) - Total duration: ${totalDuration}ms`);
+        
+        return fluidResult;
+        
     } catch (error) {
         const totalDuration = Date.now() - agenticStartTime;
-        console.error(`[AGENTIC-RISK] Error in calculateAgenticRisk after ${totalDuration}ms:`, error.message);
+        console.error(`[AGENTIC-RISK] Fluid model error after ${totalDuration}ms: ${error.message}`);
         return calculateRuleBasedRisk(features, direction, maxStopLoss, maxTakeProfit);
     }
 }
@@ -2012,22 +1879,41 @@ app.post('/api/digest-trade', (req, res) => {
     try {
         const trade = req.body;
         
-        // Validate required fields
-        if (!trade.features || !trade.direction || trade.pnl === undefined) {
+        // Validate required fields for trade outcome
+        if (!trade.instrument || !trade.direction || trade.pnl === undefined) {
             return res.status(400).json({
-                error: 'Missing required fields: features, direction, and pnl'
+                error: 'Missing required fields: instrument, direction, and pnl'
             });
         }
         
         // Feed trade to Risk Principal for digestion
         riskPrincipal.digestTradeOutcome(trade);
         
-        console.log(`[RISK-PRINCIPAL] Digested trade: ${trade.direction} ${trade.instrument} PnL=$${trade.pnl}`);
+        // Update FluidRiskModel equity curve with enhanced data
+        const normalizedPnl = trade.pnlPerContract || trade.pnl || 0;
+        fluidRiskModel.updateEquityCurve(normalizedPnl, trade.instrument, trade.timestamp, {
+            direction: trade.direction, // Critical for directional bias analysis
+            entryPrice: trade.entryPrice,
+            exitPrice: trade.exitPrice,
+            maxProfit: trade.maxProfit,
+            maxLoss: trade.maxLoss,
+            entryEfficiency: trade.entryEfficiency,
+            exitEfficiency: trade.exitEfficiency,
+            totalEfficiency: trade.totalEfficiency,
+            commission: trade.commission,
+            quantity: trade.quantity,
+            exitReason: trade.exitReason,
+            holdTimeMinutes: trade.holdTimeMinutes,
+            tradeNumber: trade.tradeNumber
+        });
+        
+        console.log(`[RISK-PRINCIPAL] Digested trade: ${trade.direction} ${trade.instrument} PnL=$${normalizedPnl}`);
         
         res.json({
             success: true,
-            message: 'Trade digested into heat maps',
-            heatMapStats: riskPrincipal.getHeatMapStats()
+            message: 'Trade digested into heat maps and fluid risk model',
+            heatMapStats: riskPrincipal.getHeatMapStats(),
+            fluidStats: fluidRiskModel.getStats()
         });
         
     } catch (error) {
@@ -2314,11 +2200,42 @@ app.post('/api/evaluate-risk', async (req, res) => {
     try {
         const { features, instrument, entryType, direction, timestamp, entrySignalId, maxStopLoss, maxTakeProfit, timeframeMinutes = 1, quantity = 1 } = req.body;
         
-        // FOCUSED LOGGING: Only log in non-backtest mode and only essential info
-        if (!CONFIG.BACKTEST_MODE) {
-            // Minimal logging - only price and timeframe
-            console.log(`[RISK-SERVICE] ${direction} ${instrument} @ ${features?.close_price || 'unknown'}`);
-        }
+        // FAST LOG: Just show the basic request info
+        console.log(`[RISK-SERVICE] ${direction} ${instrument} @ ${features?.close_price || 'unknown'}`);
+        
+        // BACKGROUND RECOVERY CHECK: Non-blocking analysis (only if likely issues)
+        setImmediate(async () => {
+            try {
+                // Quick check using memory manager first (faster than storage)
+                const recentVectors = memoryManager?.getRecentVectorsForInstrumentDirection?.(instrument, direction) || [];
+                if (recentVectors.length >= 3) {
+                    const consecutiveLosses = countConsecutiveLosses(recentVectors.slice(0, 5));
+                    const recentBigLosses = recentVectors.slice(0, 5).filter(t => (t.pnlPerContract || t.pnl) < -20).length;
+                    
+                    // Only do full analysis if there are real issues
+                    if (consecutiveLosses >= 3 || recentBigLosses >= 2) {
+                        let cumulativePnL = 0;
+                        const last5 = recentVectors.slice(0, 5);
+                        const equityCurve = last5
+                            .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+                            .map(trade => {
+                                cumulativePnL += (trade.pnlPerContract || trade.pnl || 0);
+                                return cumulativePnL;
+                            });
+                        
+                        const currentPnL = equityCurve[equityCurve.length - 1];
+                        const winRate = (last5.filter(t => (t.pnlPerContract || t.pnl) > 0).length / last5.length) * 100;
+                        const recoveryStatus = getRecoveryStatus(currentPnL, 0, consecutiveLosses, winRate);
+                        
+                        console.log(`🚨 [RECOVERY-MODE] ${direction} ${instrument} @ ${features?.close_price || 'unknown'}`);
+                        console.log(`   💰 Equity: $${currentPnL.toFixed(0)} | Losses: ${consecutiveLosses} consecutive | Win Rate: ${winRate.toFixed(0)}%`);
+                        console.log(`   🎯 Strategy: ${recoveryStatus.strategy} | Priority: ${recoveryStatus.priority}`);
+                    }
+                }
+            } catch (error) {
+                // Silently fail - background task
+            }
+        });
         
         if (!features || !instrument) {
             return res.status(400).json({
@@ -2353,27 +2270,61 @@ app.post('/api/evaluate-risk', async (req, res) => {
         let riskRecommendation;
         let predictionMethod = 'graduated_ranges'; // Default
         
-        // Determine which method to use
-        const useGP = (assignedVariant === 'gp') || 
-                      (assignedVariant === null && CONFIG.ENABLE_GP_INTEGRATION === true);
+        // Determine which method to use (GP SYSTEM DISABLED)
+        // const useGP = (assignedVariant === 'gp') || 
+        //               (assignedVariant === null && CONFIG.ENABLE_GP_INTEGRATION === true);
         const usePrunedRanges = (assignedVariant === 'pruned_ranges') ||
                                (assignedVariant === null && CONFIG.ENABLE_PRUNED_RANGES === true);
         const useRobustZones = (assignedVariant === 'robust_zones') ||
                               (assignedVariant === null && CONFIG.ENABLE_ROBUST_ZONES === true);
         
-        if (useRobustZones) {
-            // ROBUST ZONES PREDICTION - NEW IMPLEMENTATION
-            predictionMethod = 'robust_zones';
+        // FLUID RISK MODEL - Primary continuous probability-based evaluation
+        try {
+            console.log(`[RISK-SERVICE] STAGE1: Using Fluid Risk Model...`);
+            predictionMethod = 'fluid_risk_model';
             
-            try {
-                // Check if memory manager is initialized
+            riskRecommendation = await fluidRiskModel.evaluateRisk(instrument, direction, features, timestamp);
+            
+            console.log(`[FLUID-RISK] Fluid prediction completed: ${riskRecommendation.approved ? 'APPROVED' : 'REJECTED'} (${(riskRecommendation.confidence * 100).toFixed(1)}%)`);
+            
+        } catch (error) {
+            console.error(`[RISK-SERVICE] Fluid Risk Model failed, using fallback: ${error.message}`);
+            
+            // Simple fallback to range-based prediction  
+            riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
+            predictionMethod = 'graduated_ranges_fallback';
+        }
+        
+        // Skip complex nested fallback logic - FluidRiskModel is primary
+        if (false && useRobustZones) {
+                // ROBUST ZONES PREDICTION - DISABLED
+                predictionMethod = 'robust_zones';
+                
+                try {
+                    // Check if memory manager is initialized
                 if (!memoryManager.isInitialized) {
                     console.log('[ROBUST-ZONES] Memory not initialized - falling back to graduated_ranges');
                     riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
                     predictionMethod = 'graduated_ranges_fallback';
                 } else {
-                    // Run robust zones analysis
-                    const zonesAnalysis = await robustZoneEngine.analyze(features, instrument, direction, memoryManager);
+                    // Run robust zones analysis with entry type for better segregation
+                    const zonesAnalysis = await robustZoneEngine.analyze(features, instrument, direction, memoryManager, entryType);
+                    
+                    // Store the evaluation details for outcome tracking (if entrySignalId provided)
+                    if (entrySignalId) {
+                        // Store evaluation context for later outcome recording
+                        if (!global.pendingEvaluations) {
+                            global.pendingEvaluations = new Map();
+                        }
+                        global.pendingEvaluations.set(entrySignalId, {
+                            instrument,
+                            direction,
+                            entryType,
+                            confidence: zonesAnalysis.confidence,
+                            membership: zonesAnalysis.membership?.score || 0,
+                            timestamp: Date.now()
+                        });
+                    }
                     
                     // Convert zones format to standard risk recommendation format
                     riskRecommendation = {
@@ -2394,7 +2345,15 @@ app.post('/api/evaluate-risk', async (req, res) => {
                         }
                     };
                     
-                    // No verbose logging - robust zones engine handles its own focused logging
+                    // Add recovery strategy context if zones are being adjusted for recovery
+                    if (!CONFIG.BACKTEST_MODE && zonesAnalysis.zone && zonesAnalysis.zone.adjustmentType) {
+                        console.log(`   🔧 Zone Adjustment: ${zonesAnalysis.zone.adjustmentType} | Robustness: ${(zonesAnalysis.zone.robustnessScore * 100).toFixed(0)}% | Samples: ${zonesAnalysis.zone.sampleSize}`);
+                        
+                        // Add specific recovery context if confidence is low due to recent performance
+                        if (zonesAnalysis.confidence < 0.6) {
+                            console.log(`   ⚠️  Low confidence detected - Zone engine applying defensive adjustments`);
+                        }
+                    }
                 }
                 
             } catch (error) {
@@ -2402,57 +2361,10 @@ app.post('/api/evaluate-risk', async (req, res) => {
                 riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
                 predictionMethod = 'graduated_ranges_fallback';
             }
-        } else if (useGP) {
-            // GP INTEGRATION IS REQUIRED - NO FALLBACKS
-            if (!gpIntegration || !gpIntegration.enabled) {
-                throw new Error('GP_INTEGRATION_REQUIRED_BUT_NOT_ENABLED');
-            }
-            try {
-                // GP-BASED PREDICTION
-                console.log(`[RISK-SERVICE] STAGE1: Using GP-based prediction...`);
-                predictionMethod = 'gaussian_process';
-                
-                const riskData = {
-                    instrument: gpIntegration.cleanInstrumentName(instrument),
-                    direction,
-                    features,
-                    entrySignalId,
-                    timestamp
-                };
-                
-                riskRecommendation = await gpIntegration.evaluateRiskWithGP(riskData);
-                
-                console.log(`[GP-CONFIDENCE-DEBUG] Initial GP confidence: ${riskRecommendation.confidence}`);
-                console.log(`[GP-CONFIDENCE-DEBUG] Initial GP confidence type: ${typeof riskRecommendation.confidence}`);
-                console.log(`[GP-CONFIDENCE-DEBUG] Full GP response:`, JSON.stringify(riskRecommendation, null, 2));
-                
-                // Enhance with confidence engine
-                // DISABLED: Using GP confidence directly for now
-                /*
-                if (confidenceEngine) {
-                    const contextualFactors = {
-                        timeOfDay: new Date(timestamp).getHours(),
-                        marketVolatility: features.atr_percentage || features.atr_pct
-                    };
-                    
-                    const confidenceBreakdown = confidenceEngine.calculateConfidence(
-                        riskRecommendation.gpDetails || {}, 
-                        contextualFactors
-                    );
-                    
-                    riskRecommendation.confidence = confidenceBreakdown.final_confidence;
-                    riskRecommendation.confidence_breakdown = confidenceBreakdown;
-                }
-                */
-                
-                console.log(`[RISK-SERVICE] GP prediction completed: ${riskRecommendation.approved ? 'APPROVED' : 'REJECTED'} (${(riskRecommendation.confidence * 100).toFixed(1)}%)`);
-                
-            } catch (error) {
-                // NO FALLBACKS - let the error bubble up to expose the real issue
-                console.error(`[RISK-SERVICE] GP prediction failed - NO FALLBACK: ${error.message}`);
-                throw new Error(`GP_INTEGRATION_FAILED: ${error.message}`);
-            }
-        } else if (usePrunedRanges) {
+        }
+        
+        // Alternative methods (legacy - disabled while FluidRiskModel is primary)
+        if (false && usePrunedRanges) {
             // PRUNED RANGES PREDICTION
             console.log(`[RISK-SERVICE] STAGE1: Using pruned ranges prediction...`);
             predictionMethod = 'pruned_ranges';
@@ -2549,14 +2461,14 @@ app.post('/api/evaluate-risk', async (req, res) => {
             riskRecommendation.reasoning += ` | ${recentTradeAnalysis.riskAdjustment.reason}`;
         }
         
-        console.log(`[GP-CONFIDENCE-DEBUG] Pre-response confidence: ${riskRecommendation.confidence}`);
-        console.log(`[GP-CONFIDENCE-DEBUG] Recent trade analysis effect: ${recentTradeAnalysis.riskAdjustment ? 'YES' : 'NO'}`);
+        // console.log(`[GP-CONFIDENCE-DEBUG] Pre-response confidence: ${riskRecommendation.confidence}`); // GP DEBUG DISABLED
+        // console.log(`[GP-CONFIDENCE-DEBUG] Recent trade analysis effect: ${recentTradeAnalysis.riskAdjustment ? 'YES' : 'NO'}`); // GP DEBUG DISABLED
         
         // Check if confidence is being modified anywhere
         if (recentTradeAnalysis.confidencePenalty) {
-            console.log(`[GP-CONFIDENCE-DEBUG] Confidence penalty detected: ${recentTradeAnalysis.confidencePenalty}`);
+            // console.log(`[GP-CONFIDENCE-DEBUG] Confidence penalty detected: ${recentTradeAnalysis.confidencePenalty}`); // GP DEBUG DISABLED
             riskRecommendation.confidence -= recentTradeAnalysis.confidencePenalty;
-            console.log(`[GP-CONFIDENCE-DEBUG] Post-penalty confidence: ${riskRecommendation.confidence}`);
+            // console.log(`[GP-CONFIDENCE-DEBUG] Post-penalty confidence: ${riskRecommendation.confidence}`); // GP DEBUG DISABLED
         }
         
         // Log if we're rejecting
@@ -2643,6 +2555,79 @@ app.post('/api/evaluate-risk', async (req, res) => {
         // DISABLED FOR GP CONFIDENCE DEBUGGING
         // riskCache.set(cacheKey, response);
         
+        // DECISION MONITORING: Record this decision for later analysis (non-blocking)
+        if (entrySignalId && !CONFIG.BACKTEST_MODE) {
+            try {
+                // Determine if we're in recovery mode from the recent trades analysis
+                const isRecoveryMode = recentTrades && recentTrades.length >= 5 && 
+                    (() => {
+                        let cumulativePnL = 0;
+                        const equityCurve = recentTrades
+                            .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+                            .map(trade => {
+                                cumulativePnL += (trade.pnlPerContract || trade.pnl || 0);
+                                return cumulativePnL;
+                            });
+                        
+                        const currentPnL = equityCurve[equityCurve.length - 1];
+                        const peak = Math.max(...equityCurve);
+                        const drawdown = peak - currentPnL;
+                        const drawdownPercent = peak !== 0 ? (drawdown / Math.abs(peak)) * 100 : 0;
+                        const consecutiveLosses = countConsecutiveLosses(recentTrades);
+                        
+                        return currentPnL < -50 || drawdownPercent > 10 || consecutiveLosses >= 3;
+                    })();
+                
+                decisionMonitor.recordDecision(entrySignalId, {
+                    instrument,
+                    direction,
+                    entryType,
+                    confidence: response.confidence,
+                    approved: response.approved,
+                    suggestedSL: response.suggested_sl,
+                    suggestedTP: response.suggested_tp,
+                    method: response.method,
+                    reasoning: response.reasons?.[0] || 'No reasoning',
+                    recoveryMode: isRecoveryMode,
+                    recoveryStrategy: isRecoveryMode ? getRecoveryStatus(
+                        recentTrades ? (() => {
+                            let cumulativePnL = 0;
+                            const equityCurve = recentTrades
+                                .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+                                .map(trade => {
+                                    cumulativePnL += (trade.pnlPerContract || trade.pnl || 0);
+                                    return cumulativePnL;
+                                });
+                            return equityCurve[equityCurve.length - 1];
+                        })() : 0,
+                        recentTrades ? (() => {
+                            let cumulativePnL = 0;
+                            const equityCurve = recentTrades
+                                .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+                                .map(trade => {
+                                    cumulativePnL += (trade.pnlPerContract || trade.pnl || 0);
+                                    return cumulativePnL;
+                                });
+                            const peak = Math.max(...equityCurve);
+                            const currentPnL = equityCurve[equityCurve.length - 1];
+                            const drawdown = peak - currentPnL;
+                            return peak !== 0 ? (drawdown / Math.abs(peak)) * 100 : 0;
+                        })() : 0,
+                        recentTrades ? countConsecutiveLosses(recentTrades) : 0,
+                        recentTrades ? (recentTrades.filter(t => (t.pnlPerContract || t.pnl) > 0).length / recentTrades.length) * 100 : 50
+                    ).strategy : null,
+                    // Context data for analysis
+                    recentTrades: response.recentTrades,
+                    equityCurve: recentTrades ? recentTrades.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+                        .map(trade => (trade.pnlPerContract || trade.pnl || 0)) : [],
+                    consecutiveLosses: response.recentTrades?.consecutiveLosses || 0
+                });
+            } catch (error) {
+                // Don't block trading if monitoring fails
+                console.log(`[DECISION-MONITOR] Recording failed: ${error.message}`);
+            }
+        }
+        
         res.json(response);
         
     } catch (error) {
@@ -2677,6 +2662,7 @@ app.get('/config', (req, res) => {
         endpoints: {
             'POST /api/approve-signal': 'Main signal approval with heat map + agentic risk management',
             'POST /api/evaluate-risk': 'Direct risk evaluation with features from NT',
+            'POST /api/record-trade-outcome': 'Record actual trade outcome for self-correction learning',
             'POST /api/digest-trade': 'Feed completed trade to heat map system',
             'POST /api/digest-historical-trades': 'Bulk process historical trades to build heat maps',
             'GET /api/heat-maps': 'View heat map statistics and top combinations',
@@ -2715,22 +2701,13 @@ app.post('/api/trade-outcome', async (req, res) => {
 
         console.log(`[RISK-SERVICE] Processing trade outcome: ${entrySignalId} - PnL: $${actualPnl.toFixed(2)}`);
 
-        // Process through online learning
-        await onlineLearning.processTradeOutcome({
-            entrySignalId,
-            instrument,
-            direction,
-            features,
-            actualPnl,
-            actualTrajectory,
-            exitReason,
-            predictedConfidence,
-            predictionMethod
-        });
+        // Update FluidRiskModel with trade outcome
+        const normalizedPnl = actualPnl / (quantity || 1);
+        fluidRiskModel.updateEquityCurve(normalizedPnl, instrument, timestamp);
 
         res.json({
             success: true,
-            message: 'Trade outcome processed for online learning'
+            message: 'Trade outcome processed for fluid risk model'
         });
 
     } catch (error) {
@@ -2745,12 +2722,15 @@ app.post('/api/trade-outcome', async (req, res) => {
 // Online learning statistics endpoint
 app.get('/api/learning-stats', (req, res) => {
     try {
-        const stats = onlineLearning.getLearningStats();
-        res.json(stats);
+        const stats = fluidRiskModel.getStats();
+        res.json({
+            fluidRiskModel: stats,
+            message: 'Fluid risk model statistics'
+        });
     } catch (error) {
-        console.error('[RISK-SERVICE] Error getting learning stats:', error);
+        console.error('[RISK-SERVICE] Error getting fluid risk stats:', error);
         res.status(500).json({
-            error: 'Failed to get learning statistics',
+            error: 'Failed to get fluid risk statistics',
             message: error.message
         });
     }
@@ -2778,17 +2758,85 @@ app.get('/api/ab-test/report', (req, res) => {
     }
 });
 
+// Helper functions for recovery analysis
+function countConsecutiveLosses(trades) {
+    if (!trades || trades.length === 0) return 0;
+    
+    const sortedTrades = trades.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    let consecutive = 0;
+    
+    for (const trade of sortedTrades) {
+        const pnl = trade.pnlPerContract || trade.pnl || 0;
+        if (pnl < 0) {
+            consecutive++;
+        } else {
+            break;
+        }
+    }
+    
+    return consecutive;
+}
+
+function getDaysSinceLastWin(trades) {
+    if (!trades || trades.length === 0) return null;
+    
+    const sortedTrades = trades.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    const lastWin = sortedTrades.find(trade => (trade.pnlPerContract || trade.pnl || 0) > 0);
+    
+    if (!lastWin) return null;
+    
+    const daysDiff = (Date.now() - new Date(lastWin.timestamp)) / (1000 * 60 * 60 * 24);
+    return Math.floor(daysDiff);
+}
+
+function getRecoveryStatus(currentPnL, drawdownPercent, consecutiveLosses, winRate) {
+    // Determine recovery strategy based on current situation
+    if (consecutiveLosses >= 5 && currentPnL < -200) {
+        return {
+            strategy: "EMERGENCY HALT",
+            action: "Suspend trading, review market conditions",
+            priority: "🔴 CRITICAL"
+        };
+    } else if (consecutiveLosses >= 4 && drawdownPercent > 25) {
+        return {
+            strategy: "DEFENSIVE MODE", 
+            action: "Ultra-tight SL, reduced position sizes",
+            priority: "🟠 HIGH"
+        };
+    } else if (consecutiveLosses >= 3 && winRate < 30) {
+        return {
+            strategy: "PATTERN RESET",
+            action: "Tightening risk zones, waiting for better setups",
+            priority: "🟡 MEDIUM"
+        };
+    } else if (drawdownPercent > 15) {
+        return {
+            strategy: "GRADUAL RECOVERY",
+            action: "Reducing risk per trade, focus on R:R optimization",
+            priority: "🔵 LOW"
+        };
+    } else {
+        return {
+            strategy: "CAUTIOUS MONITORING",
+            action: "Minor risk adjustments, maintain vigilance", 
+            priority: "🟢 ROUTINE"
+        };
+    }
+}
+
 // Start server
 app.listen(port, async () => {
     console.log(`🎯 Agentic Memory Risk Service listening on port ${port}`);
     console.log(`🧠 Integration: Compatible with existing NinjaTrader approval mechanism`);
     console.log(`📊 Features: Adaptive risk management based on historical patterns`);
     console.log(`🔄 Fallback: Rule-based risk when insufficient historical data`);
-    console.log(`🤖 GP Integration: ${CONFIG.ENABLE_GP_INTEGRATION ? 'ENABLED' : 'DISABLED'}`);
+    // console.log(`🤖 GP Integration: ${CONFIG.ENABLE_GP_INTEGRATION ? 'ENABLED' : 'DISABLED'}`); // GP DISABLED
     console.log(`⚖️  A/B Testing: ${CONFIG.ENABLE_AB_TESTING ? 'ENABLED' : 'DISABLED'}`);
     
-    // Start periodic cleanup for online learning
-    onlineLearning.startPeriodicCleanup();
+    // FluidRiskModel is now initialized and ready
+    
+    // Start decision analysis monitoring
+    decisionMonitor.startMonitoring();
     
     // Test storage connection
     const connected = await storageClient.testConnection();

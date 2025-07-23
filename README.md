@@ -1,114 +1,81 @@
 # FluidJournal
 
-**Intelligent Trade Risk Management through Historical Pattern Analysis**
+**Intelligent Trade Storage & Equity Curve Balancing System**
 
-FluidJournal is an adaptive risk management system that learns from trading history to prevent repeating costly mistakes. By analyzing thousands of past trades (from backtesting with intentionally sub-optimal parameters), it identifies market conditions that historically lead to losses and adjusts risk parameters accordingly.
+FluidJournal is an adaptive risk management system that learns from your trading history to balance equity curves and prevent costly repeated mistakes. By storing market conditions and trade outcomes in a high-performance vector database, it intelligently adjusts risk parameters based on what actually worked in similar historical situations.
 
-## The Problem
+## The Challenge
 
-Traditional algorithmic trading systems often repeat the same mistakes because they lack memory of past performance. A strategy might consistently lose money during high volatility periods, but without historical context, it continues making the same trades under similar conditions.
+Traditional algorithmic trading systems lack memory—they can't learn from past mistakes or adapt to changing market conditions. A strategy might consistently lose money during high volatility periods but continue making the same trades because it has no historical context to guide better decisions.
 
-## Our Solution
+## Our Approach
 
-FluidJournal implements an "agentic memory" system that:
+FluidJournal solves this through **intelligent storage** and **dynamic equity curve balancing**:
 
-1. **Captures Every Trade Decision** - Records 94+ market features for each trade, including volatility, price patterns, volume data, and technical indicators
-2. **Learns from Outcomes** - Stores profit/loss results and analyzes what market conditions led to wins vs losses
-3. **Graduates Critical Features** - Identifies which market conditions are most predictive of success or failure
-4. **Adapts Risk in Real-Time** - Automatically adjusts stop-loss and take-profit levels based on similar historical patterns
+### Trade Data Storage
+- **Comprehensive Feature Capture**: Records 94+ market characteristics for every trade including volatility ratios, momentum indicators, price efficiency metrics, and technical patterns
+- **LanceDB Vector Database**: Stores high-dimensional trading data with millisecond query performance
+- **Complete Trade Lifecycle**: Tracks positions from entry through exit with precise market timing and outcome data
+
+### Equity Curve Balancing
+- **Historical Pattern Matching**: Before each trade, queries the database for similar historical market conditions
+- **Directional Bias Intelligence**: Tips the scales toward profitable directions by analyzing recent long vs short performance
+- **Dynamic Risk Adjustment**: Optimizes stop-loss and take-profit levels based on what worked in comparable past situations
+- **Loss Pattern Avoidance**: Probabilistically rejects trades when market conditions match historical loss patterns
 
 ## How It Works
 
-### Data Collection & Storage
-- **LanceDB Vector Database**: Efficiently stores high-dimensional trading data with millisecond query performance
-- **Feature Engineering**: Extracts 94+ market characteristics from each trade (volatility ratios, price efficiency, momentum indicators, etc.)
-- **Position Tracking**: Records complete trade lifecycle from entry to exit with precise timing
+When evaluating a potential trade:
 
-### Pattern Recognition & Learning
-- **Graduated Feature Analysis**: Statistically determines which market conditions correlate with profitable vs unprofitable trades
-- **Range-Based Intelligence**: Instead of finding "similar" trades, identifies optimal ranges for each market condition (e.g., volatility should be between 0.019-0.034 for profitable gold trades)
-- **Continuous Learning**: Updates pattern recognition as new trade data becomes available
+1. **Market State Analysis**: Current market features are extracted (volatility, momentum, etc.)
+2. **Historical Query**: System searches stored data for trades in similar market conditions
+3. **Outcome Analysis**: Evaluates profit/loss patterns from historical matches
+4. **Risk Optimization**: Calculates optimal risk parameters based on successful historical trades
+5. **Directional Assessment**: Considers recent directional performance to bias toward profitable patterns
+6. **Continuous Learning**: Stores new trade outcomes to improve future decisions
 
-### Risk Adaptation
-- **Historical Context**: Before entering a trade, queries similar market conditions from the database
-- **Intelligent Filtering**: Rejects trades when market conditions match patterns that historically lose money
-- **Dynamic Risk Parameters**: Adjusts stop-loss and take-profit levels based on what worked in similar past situations
+## System Architecture
 
-## Example in Action
+### Storage Agent (`localhost:3015`)
+- **LanceDB Integration**: High-performance vector storage optimized for trading data
+- **Data Validation**: Ensures trade data integrity and consistency
+- **Query Engine**: Fast similarity search across historical trade patterns
+- **REST API**: Clean endpoints for storing and retrieving trade data
 
-When the system considers a long position in gold futures:
-
-1. **Market Analysis**: Current volatility is 0.2%, recent price action shows calm conditions
-2. **Historical Query**: Searches database for similar trades (low volatility + calm markets + long direction)
-3. **Pattern Recognition**: Finds that gold long trades in these conditions historically succeed 78% of the time
-4. **Risk Optimization**: Sets stop-loss at 8 points and take-profit at 15 points based on what worked in similar situations
-5. **Learning**: After trade completion, stores outcome to improve future decisions
-
-## Technical Architecture
-
-### Storage Agent (Port 3015)
-- **LanceDB Integration**: High-performance vector storage for trade data
-- **REST API**: Endpoints for storing trade features and querying similar patterns
-- **Data Validation**: Ensures data integrity and consistency across the system
-
-### Risk Service (Port 3017)
-- **Feature Graduation**: Continuous analysis of which market conditions predict success
-- **Pattern Matching**: Finds historically similar market conditions
-- **Risk Calculation**: Determines optimal stop-loss/take-profit levels
-- **A/B Testing**: Compares different risk management approaches
-
-### Shared Libraries
-- **Inter-Service Communication**: Standardized client for seamless data flow
-- **Configuration Management**: Centralized settings for easy deployment
+### Risk Service (`localhost:3017`)
+- **FluidRiskModel**: Continuous probability-based risk evaluation engine
+- **Directional Bias Analysis**: Probabilistic rejection system to favor profitable directions  
+- **Feature Analysis**: Statistical correlation between market conditions and outcomes
+- **Risk Parameter Calculation**: Dynamic stop-loss and take-profit optimization
+- **Equity Curve Tracking**: Real-time monitoring of trading performance
 
 ## Key Innovations
 
-### Range-Based Intelligence
-Rather than traditional similarity matching, FluidJournal identifies optimal ranges for market conditions. For example, it knows that gold long trades succeed when volatility is between 0.019-0.034 but fail when volatility exceeds 0.1.
+### FluidRiskModel Engine
+Replaces rigid if/then decision trees with continuous probability functions that evaluate:
+- **Equity Protection** (30%): Recent performance and drawdown analysis
+- **Market Regime Fit** (25%): Statistical alignment with profitable market conditions
+- **Loss Avoidance** (25%): K-nearest neighbor analysis to avoid historically unprofitable patterns
+- **Profit Similarity** (20%): Kernel-weighted matching to profitable historical trades
 
-### Position Size Normalization
-All analysis accounts for position size differences, ensuring fair comparison between trades of varying contract quantities.
+### Directional Bias Intelligence  
+Analyzes recent long vs short performance to probabilistically reject trades in underperforming directions. This "tips the scales" toward more profitable directional patterns without completely blocking any direction.
 
-### Bar-Time Accuracy
-Uses actual market timestamps rather than server time, ensuring backtesting accuracy and proper temporal analysis.
+### Position-Size Normalized Analysis
+All comparisons account for position size differences, ensuring fair analysis between trades of varying contract quantities using per-contract PnL normalization.
 
 ## Getting Started
 
-```bash
-# Start both services
-./start-services.ps1
+### Prerequisites
+- Node.js 18+
+- Windows environment (PowerShell scripts provided)
+- Trading platform with REST API integration capability
 
-# Storage Agent will be available at http://localhost:3015
-# Risk Service will be available at http://localhost:3017
-```
-
-## Technology Stack
-
-- **Node.js**: Core runtime for microservices architecture
-- **LanceDB**: Vector database optimized for high-dimensional data
-- **Express.js**: REST API framework
-- **Arrow/Parquet**: Efficient data serialization
-- **Statistical Analysis**: Custom algorithms for pattern recognition
-
-## Business Impact
-
-This system transforms trading from reactive to predictive:
-- **Reduced Drawdowns**: Avoids trades during historically unfavorable conditions
-- **Optimized Risk/Reward**: Dynamically adjusts position sizing based on historical success rates
-- **Continuous Improvement**: Gets smarter with every trade, building institutional memory
-- **Scalable Architecture**: Microservices design allows for easy expansion and integration
-
-## Prerequisites
-
-- Node.js 18+ (for native fetch support)
-- Windows environment (PowerShell scripts included)
-- Trading platform integration capability
-
-## Installation & Setup
+### Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/FluidJournal.git
+git clone https://github.com/CaptrainWalrus/FluidJournal.git
 cd FluidJournal
 
 # Install dependencies for both services
@@ -119,39 +86,75 @@ cd ../risk-service && npm install
 ./start-services.ps1
 ```
 
-The system will be available at:
+Services will be available at:
 - **Storage Agent**: http://localhost:3015
 - **Risk Service**: http://localhost:3017
 
-## API Integration
+### Integration
 
-### Core Endpoints
-
-**Risk Evaluation**
+#### Risk Evaluation
 ```javascript
-POST /api/evaluate-risk
+POST http://localhost:3017/api/evaluate-risk
 {
   "instrument": "MGC",
-  "direction": "long",
-  "features": { /* 94+ market features */ }
+  "direction": "long", 
+  "features": {
+    "close_price": 2750.5,
+    "atr_percentage": 0.025,
+    "volume_ratio": 1.2,
+    "rsi_14": 45.8,
+    // ... 90+ additional market features
+  },
+  "timestamp": 1642680000000
 }
-```
 
-**Trade Storage**
-```javascript
-POST /api/store-vector
+// Response
 {
-  "sessionId": "backtest_001",
-  "features": { /* market conditions */ },
-  "outcome": { "pnl": 150, "exitReason": "profit_target" }
+  "approved": true,
+  "confidence": 0.78,
+  "suggested_sl": 12,
+  "suggested_tp": 25,
+  "reasons": ["Fluid risk analysis: 78.0% confidence", ...],
+  "risk_model": "fluid-v1"
 }
 ```
 
-## Future Development
+#### Trade Storage
+```javascript
+POST http://localhost:3015/api/store-vector
+{
+  "sessionId": "live_trading",
+  "instrument": "MGC", 
+  "direction": "long",
+  "features": { /* market conditions */ },
+  "outcome": {
+    "pnl": 180,
+    "pnlPerContract": 180, 
+    "exitReason": "profit_target",
+    "maxProfit": 220,
+    "maxLoss": -45
+  },
+  "timestamp": 1642680000000
+}
+```
 
-- Integration with additional trading platforms
-- Machine learning enhancements for pattern recognition
-- Real-time market regime detection
-- Portfolio-level risk management across multiple instruments
+## Technology Stack
+
+- **Node.js**: Microservices runtime with native fetch support
+- **LanceDB**: Apache Arrow-based vector database for high-dimensional data
+- **Express.js**: RESTful API framework
+- **Statistical Analysis**: Custom algorithms for pattern recognition and risk optimization
+
+## Business Impact
+
+FluidJournal transforms trading from reactive to adaptive:
+
+- **Reduced Drawdowns**: Automatically avoids trades during historically unfavorable market conditions
+- **Optimized Risk/Reward**: Dynamically adjusts position sizing and risk parameters based on proven historical outcomes  
+- **Directional Intelligence**: Biases trade approval toward recently profitable directions
+- **Continuous Improvement**: System becomes more intelligent with every completed trade
+- **Institutional Memory**: Never forgets what worked and what didn't in specific market conditions
 
 ---
+
+*Built for serious algorithmic traders who want their systems to learn from experience and adapt to market conditions.*

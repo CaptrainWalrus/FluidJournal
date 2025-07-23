@@ -8,24 +8,26 @@ import uuid
 
 # Set page configuration
 st.set_page_config(
-    page_title="📊 Strategy Comparison",
+    page_title="📊 Steady Equity Curve Analyzer",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Mock Data Generator (same as before but simplified)
+# New strategy list based on TraditionalStrategies.cs
 @st.cache_data
 def generate_strategy_data():
-    """Generate mock data focused on strategy comparison"""
+    """Generate mock data focused on steady equity curves"""
     
     strategies = [
-        "OrderFlowImbalance_v2.1",
-        "OrderFlowImbalance_v2.2", 
-        "EMA_Crossover_v1.5",
-        "RSI_Divergence_v3.0",
-        "VWAP_Reversion_v2.8",
-        "Breakout_Pattern_v1.3"
+        "TIME_SESSION_MOMENTUM",
+        "STATISTICAL_ZSCORE", 
+        "PRICE_VELOCITY_ACCELERATION",
+        "INTRADAY_MEAN_REVERSION",
+        "TICK_SEQUENCE_PATTERN",
+        "PRICE_DISTRIBUTION_SKEW",
+        "FOURIER_CYCLE_ANALYSIS",
+        "ENTROPY_COMPLEXITY_MEASURE"
     ]
     
     instruments = ["MGC", "ES", "NQ", "GC", "CL"]

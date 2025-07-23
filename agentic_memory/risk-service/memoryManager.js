@@ -49,65 +49,33 @@ class MemoryManager {
 
     async loadAllVectors() {
         const startTime = Date.now();
-        console.log('[MEMORY-MANAGER] Loading graduation vectors (TRAINING + RECENT) into memory...');
+        console.log('[MEMORY-MANAGER] Loading all vectors into memory (no limits, timestamp-based classification)...');
         
         try {
-            // DEBUG: Check what dataType filtering returns
-            console.log('[MEMORY-MANAGER] DEBUG: Attempting to load vectors with dataType filters...');
+            // Load ALL vectors without any dataType filtering or limits
+            const allVectorsUnfiltered = await this.storageClient.getVectors({});
+            console.log(`[MEMORY-MANAGER] ✅ ALL vectors loaded: ${allVectorsUnfiltered.length}`);
             
-            // Get TRAINING vectors
-            const trainingVectors = await this.storageClient.getVectors({ 
-                limit: 10000, 
-                dataType: 'TRAINING' 
+            // Filter vectors based on timestamp instead of dataType
+            // TRAINING: <= 2024-12-31, RECENT: > 2024-12-31
+            const end2024 = new Date('2024-12-31T23:59:59.999Z');
+            
+            const trainingVectors = allVectorsUnfiltered.filter(v => {
+                if (!v.timestamp) return true; // Include vectors without timestamp as training data
+                const vectorDate = new Date(v.timestamp);
+                return vectorDate <= end2024;
             });
-            console.log(`[MEMORY-MANAGER] DEBUG: TRAINING vectors loaded: ${trainingVectors.length}`);
             
-            // Get RECENT vectors  
-            const recentVectors = await this.storageClient.getVectors({ 
-                limit: 1000, 
-                dataType: 'RECENT' 
+            const recentVectors = allVectorsUnfiltered.filter(v => {
+                if (!v.timestamp) return false; // Exclude vectors without timestamp from recent
+                const vectorDate = new Date(v.timestamp);
+                return vectorDate > end2024;
             });
-            console.log(`[MEMORY-MANAGER] DEBUG: RECENT vectors loaded: ${recentVectors.length}`);
             
-            // If no vectors found with dataType filter, try loading without it
-            if (trainingVectors.length === 0 && recentVectors.length === 0) {
-                console.log('[MEMORY-MANAGER] DEBUG: No vectors found with dataType filter. Loading ALL vectors...');
-                const allVectorsUnfiltered = await this.storageClient.getVectors({ 
-                    limit: 10000
-                });
-                console.log(`[MEMORY-MANAGER] DEBUG: ALL vectors loaded (no filter): ${allVectorsUnfiltered.length}`);
-                
-                // Check if any vectors have dataType field
-                const vectorsWithDataType = allVectorsUnfiltered.filter(v => v.dataType);
-                console.log(`[MEMORY-MANAGER] DEBUG: Vectors with dataType field: ${vectorsWithDataType.length}`);
-                if (vectorsWithDataType.length > 0) {
-                    console.log('[MEMORY-MANAGER] DEBUG: Sample dataType values:', 
-                        vectorsWithDataType.slice(0, 5).map(v => v.dataType));
-                }
-                
-                // Use all vectors if no dataType filtering works
-                const allVectors = allVectorsUnfiltered;
-                
-                // Clear existing memory
-                this.vectors.clear();
-                this.vectorsByInstrument.clear();
-                
-                // Load into memory structures
-                for (const vector of allVectors) {
-                    this.addVectorToMemory(vector);
-                }
-                
-                this.lastVectorCount = allVectors.length;
-                const duration = Date.now() - startTime;
-                
-                console.log(`[MEMORY-MANAGER] ✅ Loaded ${allVectors.length} vectors (no dataType filter) - Duration: ${duration}ms`);
-                console.log(`[MEMORY-MANAGER] Instruments loaded:`, Array.from(this.vectorsByInstrument.keys()));
-                
-                return;
-            }
+            console.log(`[MEMORY-MANAGER] Timestamp-based classification: ${trainingVectors.length} training (≤2024), ${recentVectors.length} recent (>2024)`);
             
-            // Combine for graduation calculations
-            const allVectors = [...trainingVectors, ...recentVectors];
+            // Use all vectors for graduation calculations
+            const allVectors = allVectorsUnfiltered;
             
             // Clear existing memory
             this.vectors.clear();
@@ -121,7 +89,7 @@ class MemoryManager {
             this.lastVectorCount = allVectors.length;
             const duration = Date.now() - startTime;
             
-            console.log(`[MEMORY-MANAGER] ✅ Loaded ${trainingVectors.length} training + ${recentVectors.length} recent = ${allVectors.length} vectors for graduation - Duration: ${duration}ms`);
+            console.log(`[MEMORY-MANAGER] ✅ Loaded ${allVectors.length} vectors for graduation - Duration: ${duration}ms`);
             console.log(`[MEMORY-MANAGER] Instruments loaded:`, Array.from(this.vectorsByInstrument.keys()));
             
         } catch (error) {
@@ -414,13 +382,18 @@ class MemoryManager {
         // Normalize the requested instrument name
         const normalizedInstrument = this.normalizeInstrumentName(instrument);
         
-        // Get vectors for normalized instrument, but only RECENT dataType
+        // Get vectors for normalized instrument, but only RECENT (>2024) based on timestamp
         const instrumentVectors = this.vectorsByInstrument.get(normalizedInstrument) || [];
+        const end2024 = new Date('2024-12-31T23:59:59.999Z');
         
-        return instrumentVectors.filter(v => 
-            v.direction === direction && 
-            (v.dataType === 'RECENT' || !v.dataType) // Include legacy records without dataType
-        );
+        return instrumentVectors.filter(v => {
+            if (v.direction !== direction) return false;
+            
+            // Recent vectors are those with timestamp > 2024
+            if (!v.timestamp) return false; // No timestamp = not recent
+            const vectorDate = new Date(v.timestamp);
+            return vectorDate > end2024;
+        });
     }
 
     startBackgroundTasks() {
