@@ -6,39 +6,70 @@ class VectorStore {
   constructor() {
     this.db = null;
     this.table = null;
-    this.dbPath = process.env.LANCEDB_PATH || './data/vectors';
+    // UPDATED: Use new optimized database path (old path archived)
+    // Old path './data/vectors' archived to vectors_archived_old_schema_YYYYMMDD
+    this.dbPath = process.env.LANCEDB_PATH || './data/vectors_fresh';
     this.tableName = 'feature_vectors';
     
-    // Dynamic features - will be determined by first vector stored
+    // Enhanced features - support up to 140 features with behavioral context
     this.featureNames = null;
     this.featureCount = 0;
+    this.maxFeatures = 140; // Enhanced feature count
+    
+    // Duration prediction capabilities
+    this.minimumDurationMinutes = 15;
+    this.durationBrackets = ['0-5min', '5-15min', '15-30min', '30-60min', '60min+'];
+    this.moveTypes = ['spike_reversal', 'trend_continuation', 'consolidation_breakout', 'range_bounce', 'news_spike'];
   }
 
   async initialize() {
     try {
-      console.log(`Vector store initializing...`);
+      console.log(`[VECTOR-INIT] Starting initialization...`);
+      console.log(`[VECTOR-INIT] Database path: ${this.dbPath}`);
       
       // Ensure data directory exists
       await fs.mkdir(this.dbPath, { recursive: true });
+      console.log(`[VECTOR-INIT] Directory ensured: ${this.dbPath}`);
       
-      // Connect to LanceDB with versioning disabled
+      // List existing files
+      const files = await fs.readdir(this.dbPath);
+      console.log(`[VECTOR-INIT] Files in database directory:`, files);
+      
+      // Connect to LanceDB with proper versioning
+      console.log(`[VECTOR-INIT] Connecting to LanceDB...`);
       this.db = await lancedb.connect(this.dbPath, {
         storageOptions: {
-          enableV2ManifestPaths: false,
-          maxVersions: 1  // Keep only current version
+          enableV2ManifestPaths: false
+          // Removed maxVersions limit - let LanceDB manage versions properly
         }
       });
+      console.log(`[VECTOR-INIT] Connected to LanceDB`);
       
       // Check if table exists, create if not
       const tables = await this.db.tableNames();
+      console.log(`[VECTOR-INIT] Existing tables:`, tables);
       
       if (!tables.includes(this.tableName)) {
+        console.log(`[VECTOR-INIT] Table '${this.tableName}' not found, creating...`);
         await this.createTable();
       } else {
+        console.log(`[VECTOR-INIT] Opening existing table '${this.tableName}'...`);
         this.table = await this.db.openTable(this.tableName);
+        
+        // Debug: Check table contents
+        try {
+          const count = await this.table.filter('id IS NOT NULL').limit(1000000).execute();
+          console.log(`[VECTOR-INIT] Table opened with ${count.length} existing records`);
+          if (count.length > 0) {
+            console.log(`[VECTOR-INIT] First record ID: ${count[0].id}`);
+            console.log(`[VECTOR-INIT] Last record ID: ${count[count.length-1].id}`);
+          }
+        } catch (e) {
+          console.log(`[VECTOR-INIT] Could not count records:`, e.message);
+        }
       }
       
-      console.log(`Vector store initialized - features will be determined from stored data`);
+      console.log(`[VECTOR-INIT] Initialization complete`);
       return true;
       
     } catch (error) {
@@ -69,8 +100,8 @@ class VectorStore {
         // Data type for three-state system
         dataType: 'TRAINING', // TRAINING, RECENT, or OUT_OF_SAMPLE
         
-        // Features as Float32Array for optimal packing
-        features: new Float32Array(94), // Exact feature count, Float32 vs Float64
+        // Features as Float32Array for optimal packing (enhanced to 140)
+        features: new Float32Array(140), // Enhanced feature count, Float32 vs Float64
         
         // Outcomes (Float32 sufficient for PnL precision)
         pnl: 0.0,
@@ -80,14 +111,24 @@ class VectorStore {
         exit: 'S', // Single char exit codes: S=Sample, T=TP, L=SL, M=Manual
         maxP: 0.0, // Max profit
         maxL: 0.0, // Max loss
-        good: false // Boolean for good exit
+        good: false, // Boolean for good exit
+        
+        // ENHANCED: Duration-based outcomes
+        sustainedMinutes: 0, // How long the move lasted
+        durationBracket: '0-5min', // Duration category
+        moveType: 'unknown', // Move classification
+        sustainabilityScore: 0.0, // 0-1 sustainability rating
+        
+        // TRAJECTORY: Bar-by-bar profit tracking
+        profitByBar: new Float32Array(2000), // Support up to 2000 bars
+        profitByBarJson: '[]', // JSON string for flexible storage
+        trajectoryBars: 0, // Number of bars in trajectory
       }];
 
       this.table = await this.db.createTable(this.tableName, sampleData);
       
-      // Remove sample data and compact immediately
+      // Remove sample data (without immediate compaction)
       await this.table.delete('id = "sample"');
-      await this.table.compactFiles(); // Prevent version buildup
       
       console.log(`Created LanceDB table '${this.tableName}' with dynamic schema`);
       
@@ -174,9 +215,9 @@ class VectorStore {
         
         console.log(`[VECTOR-STORE] Storing ${recordType} record with ${featureArray.length} features`);
         
-        // Pad to 100 features for consistent schema (LanceDB requirement)
-        if (featureArray.length < 100) {
-          const paddedArray = new Float32Array(100);
+        // Pad to 140 features for enhanced schema (LanceDB requirement)
+        if (featureArray.length < 140) {
+          const paddedArray = new Float32Array(140);
           paddedArray.set(featureArray);
           featureArray = paddedArray;
         }
@@ -191,7 +232,7 @@ class VectorStore {
       }
 
       // Process trajectory data (profitByBar)
-      let profitByBarArray = new Float32Array(50); // Default empty trajectory
+      let profitByBarArray = new Float32Array(2000); // Match schema size
       let profitByBarJson = '{}';
       let trajectoryBars = 0;
       
@@ -211,8 +252,8 @@ class VectorStore {
           const barIndices = Object.keys(profitByBarDict).map(k => parseInt(k)).filter(k => !isNaN(k));
           trajectoryBars = barIndices.length > 0 ? Math.max(...barIndices) + 1 : 0;
           
-          // Fill the array with trajectory values
-          for (let i = 0; i < Math.min(trajectoryBars, 50); i++) {
+          // Fill the array with trajectory values (up to 2000 bars)
+          for (let i = 0; i < Math.min(trajectoryBars, 2000); i++) {
             const value = profitByBarDict[i.toString()] || profitByBarDict[i] || 0;
             profitByBarArray[i] = typeof value === 'number' ? value : 0;
             profitByBarObj[i] = profitByBarArray[i];
@@ -225,41 +266,46 @@ class VectorStore {
         console.log(`[TRAJECTORY] No profitByBar data found for ${entrySignalId}, using empty trajectory`);
       }
 
+      // ENHANCED: Analyze duration and move characteristics
+      const durationAnalysis = this.analyzeDuration(outcome, profitByBarDict, trajectoryBars);
+      const moveClassification = this.classifyMoveType(features, outcome, durationAnalysis);
+
       const record = {
+        // Match exact schema field names
         id,
-        timestamp: new Date(timestamp),
+        timestamp: timestamp, // Keep as number, not Date object
         entrySignalId,
-        sessionId: sessionId || 'unknown', // Store session ID for backtest separation
-        instrument,
-        entryType: entryType || 'UNKNOWN',
-        direction: direction || 'unknown',
-        timeframeMinutes: timeframeMinutes || 1, // NEW: Store timeframe in minutes
-        quantity: quantity || 1, // NEW: Store position size (number of contracts)
-        dataType: (dataType && dataType !== 'undefined') ? dataType : 'RECENT', // Three-state system: TRAINING, RECENT, OUT_OF_SAMPLE (default RECENT for learning)
-        // Store ALL features as both array and JSON for flexibility
-        features: Array.from(featureArray), // Full feature array for similarity search
-        featuresJson: featuresJson, // Features as JSON for analysis
-        featureNames: featureNames, // Track feature names for this vector (guaranteed array)
-        featureCount: featureArray.length,
-        // Force UNIFIED for all new records (legacy records will remain as-is)
-        recordType: 'UNIFIED',
-        status: 'UNIFIED',
-        // Risk and outcome data (may be empty for FEATURES records)
-        stopLoss: riskUsed?.stopLoss || (outcome?.stopLoss || 10.0),
-        takeProfit: riskUsed?.takeProfit || (outcome?.takeProfit || 20.0), 
-        virtualStop: riskUsed?.virtualStop || (outcome?.virtualStop || 0.0),
+        sessionId: sessionId || 'unknown',
+        
+        // Use shortened names to match schema
+        inst: instrument, // Schema uses 'inst'
+        type: entryType || 'UNKNOWN', // Schema uses 'type'
+        dir: direction === 'long' ? 'L' : 'S', // Schema uses 'dir' with L/S
+        qty: quantity || 1, // Schema uses 'qty'
+        
+        dataType: (dataType && dataType !== 'undefined') ? dataType : 'RECENT',
+        
+        // Features as Float32Array to match schema
+        features: featureArray, // Keep as Float32Array
+        
+        // Outcomes - use exact schema field names
         pnl: outcome?.pnl || 0.0,
-        pnlPoints: outcome?.pnlPoints || 0.0,
-        // NEW: Normalized PnL per contract for fair comparison across position sizes
-        pnlPerContract: (quantity > 0) ? (outcome?.pnl || 0.0) / quantity : 0.0,
-        pnlPointsPerContract: (quantity > 0) ? (outcome?.pnlPoints || 0.0) / quantity : 0.0,
-        holdingBars: outcome?.holdingBars || 0,
-        exitReason: outcome?.exitReason || 'UNKNOWN',
-        maxProfit: outcome?.maxProfit || 0.0,
-        maxLoss: outcome?.maxLoss || 0.0,
-        wasGoodExit: outcome?.wasGoodExit || false,
+        pnlPts: outcome?.pnlPoints || 0.0, // Schema uses 'pnlPts'
+        pnlPC: (quantity > 0) ? (outcome?.pnl || 0.0) / quantity : 0.0, // Schema uses 'pnlPC'
+        bars: outcome?.holdingBars || 0, // Schema uses 'bars'
+        exit: (outcome?.exitReason || 'UNKNOWN').charAt(0), // Schema uses single char
+        maxP: outcome?.maxProfit || 0.0, // Schema uses 'maxP'
+        maxL: outcome?.maxLoss || 0.0, // Schema uses 'maxL'
+        good: outcome?.wasGoodExit || false, // Schema uses 'good'
+        
+        // Duration fields
+        sustainedMinutes: durationAnalysis.sustainedMinutes,
+        durationBracket: durationAnalysis.bracket,
+        moveType: moveClassification.type,
+        sustainabilityScore: moveClassification.sustainabilityScore,
+        
         // Trajectory data
-        profitByBar: Array.from(profitByBarArray),
+        profitByBar: profitByBarArray, // Keep as Float32Array
         profitByBarJson: profitByBarJson,
         trajectoryBars: trajectoryBars
       };
@@ -267,8 +313,9 @@ class VectorStore {
       console.log('[VECTOR-STORE] About to add record to table:', {
         id: record.id,
         entrySignalId: record.entrySignalId,
-        recordType: record.recordType,
-        featureCount: record.featureCount,
+        inst: record.inst,
+        dir: record.dir,
+        featureCount: featureArray.length,
         hasProfitByBar: !!record.profitByBar,
         trajectoryBars: record.trajectoryBars
       });
@@ -285,6 +332,18 @@ class VectorStore {
           const duration = Date.now() - start;
           
           console.log(`[VECTOR-STORE] ✅ Successfully stored vector ${id} in ${duration}ms`);
+          
+          // DEBUG: Verify the record was actually stored
+          try {
+            const verifyQuery = await this.table.filter(`id = '${id}'`).execute();
+            console.log(`[VECTOR-STORE-DEBUG] Verification query found ${verifyQuery.length} records with ID ${id}`);
+            
+            // Check total count (must specify limit or defaults to 10!)
+            const totalCount = await this.table.filter('id IS NOT NULL').limit(1000000).execute();
+            console.log(`[VECTOR-STORE-DEBUG] Total records in table after store: ${totalCount.length}`);
+          } catch (verifyError) {
+            console.error(`[VECTOR-STORE-DEBUG] Could not verify storage:`, verifyError.message);
+          }
           
           return {
             success: true,
@@ -324,11 +383,19 @@ class VectorStore {
       console.log(`[SESSION-QUERY] Getting vectors for session: ${sessionId}`);
       
       // Query vectors by sessionId
-      const results = await this.table
+      let query = this.table
         .search()
-        .where(`sessionId = '${sessionId}'`)
-        .limit(limit)
-        .execute();
+        .where(`sessionId = '${sessionId}'`);
+      
+      // Apply limit (defaults to 10 if not specified!)
+      if (limit && limit > 0) {
+        query = query.limit(limit);
+      } else {
+        // If no limit specified, use a high limit to get all records
+        query = query.limit(1000000);
+      }
+      
+      const results = await query.execute();
       
       console.log(`[SESSION-QUERY] Found ${results.length} vectors for session ${sessionId}`);
       
@@ -580,35 +647,42 @@ class VectorStore {
         // Normalize instrument name and filter by base symbol
         const normalizedInstrument = this.normalizeInstrumentName(instrument);
         if (normalizedInstrument) {
-          // Match both exact instrument and those starting with base symbol
-          filters.push(`(instrument = '${instrument}' OR instrument LIKE '${normalizedInstrument} %' OR instrument = '${normalizedInstrument}')`);
+          // Match both exact instrument and those starting with base symbol (use 'inst' field)
+          filters.push(`(inst = '${instrument}' OR inst LIKE '${normalizedInstrument} %' OR inst = '${normalizedInstrument}')`);
         }
       }
       
       if (entryType) {
-        filters.push(`"entryType" = '${entryType}'`);
+        filters.push(`"type" = '${entryType}'`); // Use 'type' field
       }
       
-      if (timeframeMinutes) {
-        filters.push(`timeframeMinutes = ${timeframeMinutes}`);
-      }
+      // timeframeMinutes not in schema - skip
       
       if (dataType) {
         filters.push(`dataType = '${dataType}'`);
       }
       
       if (since) {
-        const sinceTimestamp = since.toISOString();
-        filters.push(`timestamp >= '${sinceTimestamp}'`);
+        // Convert to epoch milliseconds for numeric comparison
+        const sinceTimestamp = since instanceof Date ? since.getTime() : since;
+        filters.push(`timestamp >= ${sinceTimestamp}`);
       }
       
       // Use filter() for queries
       let query;
       if (filters.length > 0) {
-        query = this.table.filter(filters.join(' AND ')).limit(limit);
+        query = this.table.filter(filters.join(' AND '));
       } else {
         // Get all vectors if no filters
-        query = this.table.filter('id IS NOT NULL').limit(limit);
+        query = this.table.filter('id IS NOT NULL');
+      }
+      
+      // Apply limit (defaults to 10 if not specified!)
+      if (limit && limit > 0) {
+        query = query.limit(limit);
+      } else {
+        // If no limit specified, use a high limit to get all records
+        query = query.limit(1000000);
       }
       
       const results = await query.execute();
@@ -657,8 +731,12 @@ class VectorStore {
         };
       }
       
+      console.log('[VECTOR-STORE] Executing query for stats...');
+      
       // Get all vectors using filter with no conditions (gets everything)
-      const allVectors = await this.table.filter('id IS NOT NULL').limit(1000000).execute();
+      // IMPORTANT: Must specify limit or it defaults to 10!
+      // Use a more reasonable limit for stats
+      const allVectors = await this.table.filter('id IS NOT NULL').limit(10000).execute();
       const totalCount = allVectors.length;
       console.log(`[VECTOR-STORE] Found ${totalCount} total vectors for stats`);
       
@@ -677,12 +755,12 @@ class VectorStore {
       let totalHoldingBars = 0;
       
       allVectors.forEach(vector => {
-        // Instrument counts
-        instrumentCounts[vector.instrument] = (instrumentCounts[vector.instrument] || 0) + 1;
+        // Instrument counts (use 'inst' field)
+        instrumentCounts[vector.inst] = (instrumentCounts[vector.inst] || 0) + 1;
         
         // Detailed instrument breakdown
-        if (!instrumentBreakdown[vector.instrument]) {
-          instrumentBreakdown[vector.instrument] = {
+        if (!instrumentBreakdown[vector.inst]) {
+          instrumentBreakdown[vector.inst] = {
             total: 0,
             wins: 0,
             losses: 0,
@@ -692,17 +770,17 @@ class VectorStore {
           };
         }
         
-        instrumentBreakdown[vector.instrument].total++;
-        instrumentBreakdown[vector.instrument].totalPnl += vector.pnl || 0;
+        instrumentBreakdown[vector.inst].total++;
+        instrumentBreakdown[vector.inst].totalPnl += vector.pnl || 0;
         
         if (vector.pnl > 0) {
-          instrumentBreakdown[vector.instrument].wins++;
+          instrumentBreakdown[vector.inst].wins++;
         } else {
-          instrumentBreakdown[vector.instrument].losses++;
+          instrumentBreakdown[vector.inst].losses++;
         }
         
-        // Entry type counts
-        entryTypeCounts[vector.entryType] = (entryTypeCounts[vector.entryType] || 0) + 1;
+        // Entry type counts (use 'type' field)
+        entryTypeCounts[vector.type] = (entryTypeCounts[vector.type] || 0) + 1;
         
         // Outcome stats
         if (vector.pnl > 0) {
@@ -712,7 +790,7 @@ class VectorStore {
         }
         
         totalPnl += vector.pnl;
-        totalHoldingBars += vector.holdingBars;
+        totalHoldingBars += vector.bars || 0; // Use 'bars' field
       });
       
       // Calculate averages and win rates for each instrument
@@ -733,7 +811,7 @@ class VectorStore {
       
       if (allVectors.length > 0 && (!this.featureCount || !this.featureNames)) {
         // Get feature info from the first REAL trading vector (skip schema records)
-        const realVector = allVectors.find(v => v.instrument !== 'SCHEMA' && v.entryType !== 'SCHEMA_RECORD' && v.featureCount > 10);
+        const realVector = allVectors.find(v => v.inst !== 'SCHEMA' && v.type !== 'SCHEMA_RECORD' && v.features && v.features.length > 10);
         if (realVector && realVector.featureCount) {
           actualFeatureCount = realVector.featureCount;
         }
@@ -850,6 +928,7 @@ class VectorStore {
       }
 
       // Get all records for aggregation using proper LanceDB syntax
+      // IMPORTANT: Must specify limit or it defaults to 10!
       const allRecords = await this.table.filter('id IS NOT NULL').limit(1000000).execute();
 
       // Aggregate by symbol
@@ -860,7 +939,7 @@ class VectorStore {
 
       allRecords.forEach(record => {
         // Symbol aggregation (using 'instrument' field)
-        const symbol = record.instrument || 'Unknown';
+        const symbol = record.inst || 'Unknown';
         if (!symbolStats[symbol]) {
           symbolStats[symbol] = {
             total: 0,
@@ -887,7 +966,7 @@ class VectorStore {
         }
 
         // Entry type aggregation
-        const entryType = record.entryType || 'Unknown';
+        const entryType = record.type || 'Unknown';
         if (!entryTypeStats[entryType]) {
           entryTypeStats[entryType] = {
             total: 0,
@@ -976,6 +1055,162 @@ class VectorStore {
       console.error('Failed to get aggregated stats:', error);
       throw error;
     }
+  }
+
+  // ENHANCED: Duration analysis methods
+  analyzeDuration(outcome, profitByBar, trajectoryBars) {
+    let sustainedMinutes = 0;
+    let bracket = '0-5min';
+    
+    // Calculate sustained duration from trajectory or holding bars
+    if (trajectoryBars > 0) {
+      sustainedMinutes = trajectoryBars; // Each bar = 1 minute
+    } else if (outcome?.holdingBars) {
+      sustainedMinutes = outcome.holdingBars;
+    }
+    
+    // Classify into duration bracket
+    if (sustainedMinutes >= 60) bracket = '60min+';
+    else if (sustainedMinutes >= 30) bracket = '30-60min';
+    else if (sustainedMinutes >= 15) bracket = '15-30min';
+    else if (sustainedMinutes >= 5) bracket = '5-15min';
+    
+    return {
+      sustainedMinutes,
+      bracket
+    };
+  }
+
+  classifyMoveType(features, outcome, durationAnalysis) {
+    const pnl = outcome?.pnl || 0;
+    const duration = durationAnalysis.sustainedMinutes;
+    
+    let type = 'unknown';
+    let sustainabilityScore = 0.5;
+    
+    // Basic classification logic
+    if (duration < 5) {
+      type = 'spike_reversal';
+      sustainabilityScore = 0.2;
+    } else if (duration >= 30) {
+      if (pnl > 0) {
+        type = 'trend_continuation';
+        sustainabilityScore = 0.8;
+      } else {
+        type = 'consolidation_breakout';
+        sustainabilityScore = 0.6;
+      }
+    } else {
+      type = 'range_bounce';
+      sustainabilityScore = 0.5;
+    }
+    
+    return {
+      type,
+      sustainabilityScore
+    };
+  }
+
+  // ENHANCED: Duration prediction capability
+  async predictDuration(queryFeatures, options = {}) {
+    try {
+      const {
+        instrument,
+        minimumDuration = this.minimumDurationMinutes,
+        limit = 100
+      } = options;
+      
+      console.log(`[DURATION-PREDICTION] Predicting duration for ${instrument} (minimum: ${minimumDuration}min)`);
+      
+      // Convert queryFeatures to array if it's an object
+      let queryVector = queryFeatures;
+      if (typeof queryFeatures === 'object' && !Array.isArray(queryFeatures)) {
+        queryVector = Object.values(queryFeatures);
+      }
+      
+      // Find similar patterns
+      const similarPatterns = await this.findSimilarVectors(queryVector, {
+        instrument,
+        limit: limit * 2
+      });
+      
+      if (similarPatterns.length === 0) {
+        return {
+          predictedDuration: 0,
+          confidence: 0,
+          durationBrackets: {},
+          recommendation: 'INSUFFICIENT_DATA'
+        };
+      }
+      
+      // Analyze duration distribution
+      const durations = similarPatterns.map(p => p.sustainedMinutes || 0);
+      const durationBrackets = this.categorizeDurations(durations);
+      
+      // Calculate confidence (percentage lasting >= minimum duration)
+      const sustainedCount = durations.filter(d => d >= minimumDuration).length;
+      const confidence = sustainedCount / durations.length;
+      
+      // Predict most likely duration (weighted average)
+      const predictedDuration = this.calculateWeightedDuration(similarPatterns);
+      
+      // Determine recommendation
+      let recommendation = 'WAIT_FOR_BETTER_SETUP';
+      if (confidence >= 0.7) recommendation = 'TAKE_TRADE';
+      else if (confidence >= 0.5) recommendation = 'MODERATE_CONFIDENCE';
+      
+      console.log(`[DURATION-PREDICTION] Prediction: ${predictedDuration.toFixed(1)}min, Confidence: ${(confidence * 100).toFixed(1)}%`);
+      
+      return {
+        predictedDuration,
+        confidence,
+        durationBrackets,
+        recommendation,
+        sampleSize: similarPatterns.length
+      };
+      
+    } catch (error) {
+      console.error('Failed to predict duration:', error);
+      throw error;
+    }
+  }
+
+  categorizeDurations(durations) {
+    const brackets = {
+      '0-5min': durations.filter(d => d < 5).length,
+      '5-15min': durations.filter(d => d >= 5 && d < 15).length,
+      '15-30min': durations.filter(d => d >= 15 && d < 30).length,
+      '30-60min': durations.filter(d => d >= 30 && d < 60).length,
+      '60min+': durations.filter(d => d >= 60).length
+    };
+    
+    const total = durations.length;
+    Object.keys(brackets).forEach(bracket => {
+      brackets[bracket] = {
+        count: brackets[bracket],
+        percentage: total > 0 ? brackets[bracket] / total : 0
+      };
+    });
+    
+    return brackets;
+  }
+
+  calculateWeightedDuration(patterns) {
+    if (patterns.length === 0) return 0;
+    
+    // Weight by similarity score
+    let totalWeighted = 0;
+    let totalWeight = 0;
+    
+    patterns.forEach(pattern => {
+      const weight = pattern._similarity_score || 1;
+      const duration = pattern.sustainedMinutes || 0;
+      
+      totalWeighted += duration * weight;
+      totalWeight += weight;
+    });
+    
+    return totalWeight > 0 ? totalWeighted / totalWeight : 0;
   }
 
   async close() {

@@ -37,7 +37,7 @@ class FluidRiskModel {
     /**
      * Main entry point - evaluate risk using continuous probability functions
      */
-    async evaluateRisk(instrument, direction, features, timestamp) {
+    async evaluateRisk(instrument, direction, features, timestamp, maxStopLoss = null, maxTakeProfit = null) {
         const startTime = Date.now();
         
         try {
@@ -74,7 +74,7 @@ class FluidRiskModel {
             }
             
             // Dynamic risk parameter scaling based on confidence
-            const riskParams = this.calculateRiskParameters(overallConfidence, equityScore);
+            const riskParams = this.calculateRiskParameters(overallConfidence, equityScore, maxStopLoss, maxTakeProfit);
             
             const duration = Date.now() - startTime;
             
@@ -327,24 +327,34 @@ class FluidRiskModel {
     /**
      * Calculate risk parameters (SL/TP) based on continuous confidence score
      */
-    calculateRiskParameters(confidence, equityScore) {
-        // Base risk parameters
-        let stopLoss = 25;   // Default stop loss
-        let takeProfit = 50; // Default take profit
+    calculateRiskParameters(confidence, equityScore, maxStopLoss = null, maxTakeProfit = null) {
+        // Use input values from NinjaTrader if provided, otherwise use defaults
+        let baseStopLoss = maxStopLoss || 25;   // Scale from NT input
+        let baseTakeProfit = maxTakeProfit || 50; // Scale from NT input
         
-        // Confidence-based scaling (sigmoid curves)
-        const confidenceMultiplier = 1 + 0.5 * (1 / (1 + Math.exp(-10 * (confidence - 0.6))));
+        // Calculate percentage adjustments based on risk factors
+        // High confidence = tighter SL, wider TP
+        // Low confidence = wider SL, tighter TP
         
-        // Equity-based protection (exponential scaling)
-        const equityMultiplier = 1 + 0.3 * Math.exp(2 * (equityScore - 0.7));
+        // Confidence factor: 0.5 confidence = 100%, 0.8 confidence = 120%, 0.3 confidence = 80%
+        const confidenceRange = Math.max(0.3, Math.min(1.0, confidence));
+        const confidencePercent = 0.6 + (confidenceRange - 0.5) * 0.8; // Range: 0.36 to 1.04
         
-        // Apply scaling
-        stopLoss = Math.round(stopLoss / confidenceMultiplier);
-        takeProfit = Math.round(takeProfit * confidenceMultiplier * equityMultiplier);
+        // Equity protection factor: Good equity = tighter risk, poor equity = wider risk
+        const equityRange = Math.max(0.3, Math.min(1.0, equityScore));
+        const equityPercent = 0.7 + (equityRange - 0.5) * 0.6; // Range: 0.58 to 1.12
         
-        // Ensure minimum bounds
-        stopLoss = Math.max(15, Math.min(40, stopLoss));
-        takeProfit = Math.max(30, Math.min(100, takeProfit));
+        // Apply percentage-based adjustments
+        // SL: Lower percentage for higher confidence (tighter stops)
+        const slPercent = Math.max(0.5, Math.min(1.5, 1.3 - confidencePercent)); // 50-150% of input
+        // TP: Higher percentage for higher confidence (wider targets)  
+        const tpPercent = Math.max(0.7, Math.min(2.0, confidencePercent * equityPercent)); // 70-200% of input
+        
+        let stopLoss = Math.round(baseStopLoss * slPercent);
+        let takeProfit = Math.round(baseTakeProfit * tpPercent);
+        
+        console.log(`[FLUID-RISK] Risk % adjustment: Confidence ${(confidence*100).toFixed(1)}% -> SL ${(slPercent*100).toFixed(0)}%, TP ${(tpPercent*100).toFixed(0)}%`);
+        console.log(`[FLUID-RISK] Risk scaling: Base SL:${baseStopLoss} TP:${baseTakeProfit} -> Final SL:${stopLoss} TP:${takeProfit}`);
         
         return { stopLoss, takeProfit };
     }

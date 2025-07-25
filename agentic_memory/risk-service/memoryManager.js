@@ -1,4 +1,5 @@
 const AgenticMemoryClient = require('../shared/agenticMemoryClient');
+const AntiOverfittingManager = require('../storage-agent/src/antiOverfittingManager');
 
 class MemoryManager {
     constructor() {
@@ -22,7 +23,10 @@ class MemoryManager {
         this.lastGraduationBarTime = null;
         this.GRADUATION_INTERVAL_MINUTES = 30;
         
-        console.log('[MEMORY-MANAGER] Initialized - preparing for vector loading');
+        // Anti-overfitting manager
+        this.antiOverfittingManager = new AntiOverfittingManager();
+        
+        console.log('[MEMORY-MANAGER] Initialized with anti-overfitting protection - preparing for vector loading');
     }
 
     async initialize() {
@@ -544,7 +548,7 @@ class MemoryManager {
         return this.graduationTables.get(key);
     }
 
-    calculateRangeBasedConfidence(queryFeatures, instrument, direction) {
+    calculateRangeBasedConfidence(queryFeatures, instrument, direction, timestamp = new Date().toISOString(), entrySignalId = 'unknown') {
         const graduationTable = this.getGraduationTable(instrument, direction);
         
         if (!graduationTable || !graduationTable.features) {
@@ -553,7 +557,8 @@ class MemoryManager {
                 approved: true,
                 reason: "No graduation data available - using default",
                 featureConfidences: [],
-                rejectCount: 0
+                rejectCount: 0,
+                antiOverfitting: { applied: false, reason: 'No graduation data' }
             };
         }
         
@@ -587,32 +592,56 @@ class MemoryManager {
             }
         }
         
-        const overallConfidence = validFeatures > 0 ? totalConfidence / validFeatures : 0.5;
+        let baseConfidence = validFeatures > 0 ? totalConfidence / validFeatures : 0.5;
         
-        // Decision logic
+        // Apply anti-overfitting adjustment
+        const overfittingAdjustment = this.antiOverfittingManager.applyAntiOverfittingAdjustment(
+            baseConfidence,
+            entrySignalId,
+            timestamp,
+            queryFeatures
+        );
+        
+        const finalConfidence = overfittingAdjustment.adjustedConfidence;
+        
+        // Decision logic with anti-overfitting consideration
         let approved = true;
         let reason = "Range-based analysis";
         
-        if (rejectCount >= 3) {
+        if (overfittingAdjustment.blocked) {
+            approved = false;
+            reason = `Anti-overfitting: ${overfittingAdjustment.adjustment.reason}`;
+        } else if (rejectCount >= 3) {
             approved = false;
             reason = `${rejectCount} features in poor range (>=3 threshold)`;
-        } else if (overallConfidence < 0.25) {
+        } else if (finalConfidence < 0.25) {
             approved = false;
-            reason = `Overall confidence too low: ${(overallConfidence * 100).toFixed(1)}%`;
-        } else if (overallConfidence < 0.4) {
-            reason = `Low confidence conditions: ${(overallConfidence * 100).toFixed(1)}%`;
-        } else if (overallConfidence > 0.7) {
-            reason = `Optimal trading conditions: ${(overallConfidence * 100).toFixed(1)}%`;
+            reason = `Overall confidence too low: ${(finalConfidence * 100).toFixed(1)}%`;
+        } else if (finalConfidence < 0.4) {
+            reason = `Low confidence conditions: ${(finalConfidence * 100).toFixed(1)}%`;
+        } else if (finalConfidence > 0.7) {
+            reason = `Optimal trading conditions: ${(finalConfidence * 100).toFixed(1)}%`;
+        }
+        
+        // Add anti-overfitting info to reason if adjustment was applied
+        if (overfittingAdjustment.adjustment.exposure > 0) {
+            reason += ` (pattern exposure: ${overfittingAdjustment.adjustment.exposure}x)`;
         }
         
         return {
-            overallConfidence,
+            overallConfidence: finalConfidence,
+            baseConfidence,
             approved,
             reason,
             featureConfidences,
             rejectCount,
             validFeatures,
-            graduationVersion: graduationTable.version || "legacy"
+            graduationVersion: graduationTable.version || "legacy",
+            antiOverfitting: {
+                applied: true,
+                ...overfittingAdjustment,
+                confidenceAdjustment: finalConfidence - baseConfidence
+            }
         };
     }
 
@@ -716,6 +745,30 @@ class MemoryManager {
             instruments: Array.from(this.vectorsByInstrument.keys()),
             graduationTables: Array.from(this.graduationTables.keys())
         };
+    }
+
+    // Backtest control methods
+    startBacktest(startDate, endDate, resetLearning = true) {
+        console.log(`[MEMORY-MANAGER] Starting backtest from ${startDate} to ${endDate} (reset: ${resetLearning})`);
+        return this.antiOverfittingManager.startBacktest(startDate, endDate, resetLearning);
+    }
+
+    endBacktest() {
+        console.log('[MEMORY-MANAGER] Ending backtest');
+        return this.antiOverfittingManager.endBacktest();
+    }
+
+    getAntiOverfittingStats() {
+        return {
+            backtestStats: this.antiOverfittingManager.getBacktestStats(),
+            exposureReport: this.antiOverfittingManager.getExposureReport(),
+            isBacktestMode: this.antiOverfittingManager.isBacktestMode
+        };
+    }
+
+    configureAntiOverfitting(settings) {
+        console.log('[MEMORY-MANAGER] Configuring anti-overfitting settings:', settings);
+        return this.antiOverfittingManager.configure(settings);
     }
 
     shutdown() {

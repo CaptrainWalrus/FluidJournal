@@ -764,12 +764,14 @@ app.post('/api/approve-signal', async (req, res) => {
             // Use memory-based calculation (no storage queries needed)
             riskRecommendation = await calculateAgenticRisk(instrument, direction, features, timestamp);
         } else {
-            // FALLBACK: Use rule-based when memory not available
-            console.log(`[RISK-SERVICE] Memory not initialized - using rule-based only`);
-            riskRecommendation = calculateRuleBasedRisk(features, direction);
-            riskRecommendation.confidence = Math.max(riskRecommendation.confidence, 0.65); // Ensure approval
-            riskRecommendation.reasoning += " (Memory not initialized)";
-            riskRecommendation.method += "_no_memory";
+            // ERROR: Memory manager must be initialized for agentic memory system
+            console.error(`[RISK-SERVICE] ERROR: Memory not initialized - agentic memory system unavailable`);
+            return res.status(503).json({
+                success: false,
+                error: 'Agentic memory system not available',
+                message: 'Memory manager not initialized - cannot provide risk assessment',
+                timestamp: new Date().toISOString()
+            });
         }
         
         // Analyze recent trades to avoid repeating poor decisions (use memory when available)
@@ -1258,7 +1260,7 @@ async function analyzeRecentTrades(instrument, direction, timestamp, limit = 10)
 }
 
 // NEW: Fast memory-based risk calculation (replaces slow storage queries)
-function calculateMemoryBasedRisk(instrument, direction, features, maxStopLoss = null, maxTakeProfit = null) {
+function calculateMemoryBasedRisk(instrument, direction, features, maxStopLoss = null, maxTakeProfit = null, timestamp = null, entrySignalId = null) {
     const startTime = Date.now();
     
     try {
@@ -1287,7 +1289,7 @@ function calculateMemoryBasedRisk(instrument, direction, features, maxStopLoss =
         console.log(`[MEMORY-RISK] Using graduation table: ${graduationTable.features.length} features, ${graduationTable.vectorCount} patterns`);
         
         // REVOLUTIONARY: Use range-based confidence instead of similarity matching
-        const rangeAnalysis = memoryManager.calculateRangeBasedConfidence(features, instrument, direction);
+        const rangeAnalysis = memoryManager.calculateRangeBasedConfidence(features, instrument, direction, timestamp, entrySignalId);
         
         console.log(`[MEMORY-RISK] Range-based confidence: ${(rangeAnalysis.overallConfidence * 100).toFixed(1)}% (${rangeAnalysis.validFeatures} features analyzed)`);
         console.log(`[MEMORY-RISK] Range analysis: ${rangeAnalysis.approved ? 'APPROVED' : 'REJECTED'} - ${rangeAnalysis.reason}`);
@@ -1340,47 +1342,46 @@ function calculateMemoryBasedRisk(instrument, direction, features, maxStopLoss =
 
 // Calculate risk using Agentic Memory patterns (SLOW - legacy fallback)
 // Helper function for range-based risk calculation (wrapper for existing logic)
-async function calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss = null, maxTakeProfit = null) {
+async function calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss = null, maxTakeProfit = null, entrySignalId = null) {
     // FAST PATH: If memory manager is initialized, use it directly
     if (memoryManager.isInitialized) {
-        return calculateMemoryBasedRisk(instrument, direction, features, maxStopLoss, maxTakeProfit);
+        return calculateMemoryBasedRisk(instrument, direction, features, maxStopLoss, maxTakeProfit, timestamp, entrySignalId);
     }
     
-    // FALLBACK: No memory manager = use rule-based (no stats check needed)
-    console.log('[RANGE-BASED] Memory not initialized - using rule-based fallback');
-    return calculateRuleBasedRisk(features, direction, maxStopLoss, maxTakeProfit);
+    // ERROR: This should never be reached since we check memory initialization earlier
+    throw new Error('Memory manager not initialized - this should be caught earlier in the request flow');
 }
 
 async function calculateAgenticRisk(instrument, direction, features, timestamp, maxStopLoss = null, maxTakeProfit = null) {
     const agenticStartTime = Date.now();
     
-    // EARLY EXIT: Skip everything if no memory manager
+    // EARLY EXIT: This should never be reached since we check memory initialization earlier
     if (!memoryManager.isInitialized) {
-        console.log('[AGENTIC-RISK] Memory not initialized - using rule-based');
-        return calculateRuleBasedRisk(features, direction, maxStopLoss, maxTakeProfit);
+        throw new Error('Memory manager not initialized - this should be caught earlier in the request flow');
     }
     
     // EARLY EXIT: Check if we have ANY data for this instrument
     const vectorCount = memoryManager.getVectorsForInstrumentDirection(instrument, direction).length;
     if (vectorCount === 0) {
-        console.log(`[AGENTIC-RISK] No data for ${instrument}_${direction} - using rule-based`);
-        return calculateRuleBasedRisk(features, direction, maxStopLoss, maxTakeProfit);
+        console.log(`[AGENTIC-RISK] No data for ${instrument}_${direction} - insufficient training data`);
+        return {
+            approved: false,
+            confidence: 0.0,
+            suggestedSl: null,
+            suggestedTp: null,
+            method: 'error_insufficient_data',
+            reasoning: `No historical data available for ${instrument} ${direction} trades. Need training data to make risk assessments.`,
+            error: 'Insufficient training data'
+        };
     }
     
     try {
         // NEW: Use Fluid Risk Model for continuous probability-based evaluation
         console.log(`[AGENTIC-RISK] Using Fluid Risk Model for ${instrument}_${direction}`);
-        const fluidResult = await fluidRiskModel.evaluateRisk(instrument, direction, features, timestamp);
+        const fluidResult = await fluidRiskModel.evaluateRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
         
-        // Apply any maxStopLoss/maxTakeProfit constraints if provided
-        if (maxStopLoss && fluidResult.suggested_sl > maxStopLoss) {
-            fluidResult.suggested_sl = maxStopLoss;
-            fluidResult.reasons.push(`Stop loss capped at ${maxStopLoss}`);
-        }
-        if (maxTakeProfit && fluidResult.suggested_tp > maxTakeProfit) {
-            fluidResult.suggested_tp = maxTakeProfit;
-            fluidResult.reasons.push(`Take profit capped at ${maxTakeProfit}`);
-        }
+        // FluidRiskModel now handles maxStopLoss/maxTakeProfit scaling internally
+        // No need to cap values - they are percentage-based adjustments of the input values
         
         const totalDuration = Date.now() - agenticStartTime;
         console.log(`[AGENTIC-RISK] COMPLETED (fluid model) - Total duration: ${totalDuration}ms`);
@@ -2198,8 +2199,50 @@ app.post('/api/evaluate-risk', async (req, res) => {
     const startTime = Date.now();
     
     try {
-        const { features, instrument, entryType, direction, timestamp, entrySignalId, maxStopLoss, maxTakeProfit, timeframeMinutes = 1, quantity = 1 } = req.body;
+        const { 
+            features, 
+            instrument, 
+            entryType, 
+            direction, 
+            timestamp, 
+            entrySignalId, 
+            maxStopLoss, 
+            maxTakeProfit, 
+            timeframeMinutes = 1, 
+            quantity = 1,
+            antiOverfitting = { enabled: false }
+        } = req.body;
         
+        // Configure anti-overfitting if enabled
+        if (antiOverfitting && antiOverfitting.enabled && memoryManager.isInitialized) {
+            try {
+                // Configure anti-overfitting parameters
+                memoryManager.configureAntiOverfitting({
+                    maxExposureCount: antiOverfitting.maxExposure || 5,
+                    diminishingFactor: antiOverfitting.diminishingFactor || 0.8,
+                    timeWindowMinutes: antiOverfitting.timeWindowMinutes || 60
+                });
+                
+                // Handle backtest mode
+                if (antiOverfitting.backtestMode && antiOverfitting.backtestMode !== 'LiveTrading') {
+                    const backtestConfig = {
+                        startDate: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days back
+                        endDate: new Date().toISOString(),
+                        resetLearning: antiOverfitting.resetLearning !== false
+                    };
+                    
+                    if (antiOverfitting.backtestMode === 'BacktestIsolated') {
+                        backtestConfig.startDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 days for isolated
+                    }
+                    
+                    memoryManager.startBacktest(backtestConfig.startDate, backtestConfig.endDate, backtestConfig.resetLearning);
+                    console.log(`[ANTI-OVERFITTING] Configured: mode=${antiOverfitting.backtestMode}, reset=${backtestConfig.resetLearning}`);
+                }
+            } catch (error) {
+                console.error(`[ANTI-OVERFITTING] Configuration failed: ${error.message}`);
+            }
+        }
+
         // FAST LOG: Just show the basic request info
         console.log(`[RISK-SERVICE] ${direction} ${instrument} @ ${features?.close_price || 'unknown'}`);
         
@@ -2283,7 +2326,7 @@ app.post('/api/evaluate-risk', async (req, res) => {
             console.log(`[RISK-SERVICE] STAGE1: Using Fluid Risk Model...`);
             predictionMethod = 'fluid_risk_model';
             
-            riskRecommendation = await fluidRiskModel.evaluateRisk(instrument, direction, features, timestamp);
+            riskRecommendation = await fluidRiskModel.evaluateRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
             
             console.log(`[FLUID-RISK] Fluid prediction completed: ${riskRecommendation.approved ? 'APPROVED' : 'REJECTED'} (${(riskRecommendation.confidence * 100).toFixed(1)}%)`);
             
@@ -2291,7 +2334,7 @@ app.post('/api/evaluate-risk', async (req, res) => {
             console.error(`[RISK-SERVICE] Fluid Risk Model failed, using fallback: ${error.message}`);
             
             // Simple fallback to range-based prediction  
-            riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
+            riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit, entrySignalId);
             predictionMethod = 'graduated_ranges_fallback';
         }
         
@@ -2304,7 +2347,7 @@ app.post('/api/evaluate-risk', async (req, res) => {
                     // Check if memory manager is initialized
                 if (!memoryManager.isInitialized) {
                     console.log('[ROBUST-ZONES] Memory not initialized - falling back to graduated_ranges');
-                    riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
+                    riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit, entrySignalId);
                     predictionMethod = 'graduated_ranges_fallback';
                 } else {
                     // Run robust zones analysis with entry type for better segregation
@@ -2358,7 +2401,7 @@ app.post('/api/evaluate-risk', async (req, res) => {
                 
             } catch (error) {
                 console.log(`[ROBUST-ZONES] Analysis failed: ${error.message}, falling back to graduated_ranges`);
-                riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
+                riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit, entrySignalId);
                 predictionMethod = 'graduated_ranges_fallback';
             }
         }
@@ -2373,7 +2416,7 @@ app.post('/api/evaluate-risk', async (req, res) => {
                 // EARLY EXIT: Check if memory manager is initialized (same pattern as graduated_ranges)
                 if (!memoryManager.isInitialized) {
                     console.log('[PRUNED-RANGES] Memory not initialized - falling back to graduated_ranges');
-                    riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
+                    riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit, entrySignalId);
                     predictionMethod = 'graduated_ranges_fallback';
                 } else {
                     // FAST: Use memory-based trade data (identical to graduated_ranges approach)
@@ -2383,7 +2426,7 @@ app.post('/api/evaluate-risk', async (req, res) => {
                     // EARLY EXIT: Check if we have enough data (same pattern as graduated_ranges)
                     if (recentTrades.length < 10) {
                         console.log(`[PRUNED-RANGES] Insufficient data for ${instrument}_${direction} (${recentTrades.length} vectors, need 10+), using graduated_ranges`);
-                        riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
+                        riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit, entrySignalId);
                         predictionMethod = 'graduated_ranges_fallback';
                     } else {
                         // Run pruned ranges analysis with full dataset and entry type
@@ -2418,13 +2461,13 @@ app.post('/api/evaluate-risk', async (req, res) => {
                 console.error(`[RISK-SERVICE] Pruned ranges prediction failed: ${error.message}`);
                 // Fallback to graduated ranges for pruned ranges failures
                 console.log(`[RISK-SERVICE] Falling back to graduated ranges...`);
-                riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
+                riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit, entrySignalId);
                 predictionMethod = 'graduated_ranges_fallback';
             }
         } else {
             // RANGE-BASED PREDICTION (original logic)
             console.log(`[RISK-SERVICE] STAGE1: Using range-based prediction...`);
-            riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit);
+            riskRecommendation = await calculateRangeBasedRisk(instrument, direction, features, timestamp, maxStopLoss, maxTakeProfit, entrySignalId);
             predictionMethod = 'graduated_ranges';
         }
         
@@ -2531,7 +2574,18 @@ app.post('/api/evaluate-risk', async (req, res) => {
                 totalRecentTrades: recentTradeAnalysis.totalRecentTrades,
                 avgMaxProfit: recentTradeAnalysis.avgMaxProfit,
                 riskAdjustment: recentTradeAnalysis.riskAdjustment
-            }
+            },
+            // Anti-overfitting information
+            antiOverfitting: antiOverfitting && antiOverfitting.enabled ? {
+                enabled: true,
+                applied: riskRecommendation.antiOverfitting?.applied || false,
+                confidenceAdjustment: riskRecommendation.antiOverfitting?.confidenceAdjustment || 0,
+                originalConfidence: riskRecommendation.baseConfidence || riskRecommendation.confidence,
+                adjustmentType: riskRecommendation.antiOverfitting?.adjustment?.adjustmentType || 'none',
+                patternExposure: riskRecommendation.antiOverfitting?.adjustment?.exposure || 0,
+                blocked: riskRecommendation.antiOverfitting?.blocked || false,
+                reason: riskRecommendation.antiOverfitting?.adjustment?.reason || 'none'
+            } : { enabled: false }
         };
         
         // A/B Testing: Record prediction if enabled
@@ -2856,11 +2910,15 @@ app.listen(port, async () => {
             console.log(`[MEMORY-DEBUG] Graduation tables: ${stats.graduationTables.join(', ')}`);
             
         } catch (error) {
-            console.log(`⚠️  Memory manager initialization failed: ${error.message}`);
-            console.log(`🔄 Falling back to direct storage queries`);
-            console.log(`[MEMORY-DEBUG] Full error:`, error);
+            console.error(`❌ CRITICAL ERROR: Memory manager initialization failed: ${error.message}`);
+            console.error(`❌ Agentic memory system cannot function without proper memory manager`);
+            console.error(`[MEMORY-DEBUG] Full error:`, error);
+            process.exit(1);
         }
     } else {
-        console.log(`⚠️  Storage Agent not available - using rule-based fallback only`);
+        console.error(`❌ CRITICAL ERROR: Storage Agent not available at ${storageClient.baseUrl}`);
+        console.error(`❌ Agentic memory system cannot function without storage agent`);
+        console.error(`❌ Please start storage agent before using risk service`);
+        process.exit(1);
     }
 });

@@ -1,88 +1,168 @@
-# FluidJournal
+# FluidJournal: Agentic Memory Trading System
 
-**Intelligent Trade Storage & Equity Curve Balancing System**
+## DISCLAIMER: THIS IS EXPERIMENTAL.  TRADING IS RISKY BUSINESS, YOUR RISK IS NOT MINE.
 
-FluidJournal is an adaptive risk management system that learns from your trading history to balance equity curves and prevent costly repeated mistakes. By storing market conditions and trade outcomes in a high-performance vector database, it intelligently adjusts risk parameters based on what actually worked in similar historical situations.
+## Problem
 
-## The Challenge
+Simple algorithmic trading systems suffer from several limitations:
 
-Traditional algorithmic trading systems lack memory—they can't learn from past mistakes or adapt to changing market conditions. A strategy might consistently lose money during high volatility periods but continue making the same trades because it has no historical context to guide better decisions.
+1. **Static Risk Management**: Fixed stop-loss and take-profit parameters that don't adapt to changing market conditions
+2. **No Learning from History**: Each trade is treated in isolation without learning from past successes and failures
+3. **Pattern Blindness**: Inability to recognize when similar market conditions led to specific outcomes
+4. **Overfitting Risk**: Backtesting often leads to strategies that work perfectly on historical data but fail in live trading
 
-## Our Approach
+These limitations result in:
+- Repeated mistakes in similar market conditions
+- Suboptimal risk parameters that don't match current volatility
+- Inability to detect when a previously profitable pattern stops working
+- Poor adaptation to changing market regimes
 
-FluidJournal solves this through **intelligent storage** and **dynamic equity curve balancing**:
+## Concept
 
-### Trade Data Storage
-- **Comprehensive Feature Capture**: Records 94+ market characteristics for every trade including volatility ratios, momentum indicators, price efficiency metrics, and technical patterns
-- **LanceDB Vector Database**: Stores high-dimensional trading data with millisecond query performance
-- **Complete Trade Lifecycle**: Tracks positions from entry through exit with precise market timing and outcome data
+FluidJournal implements an **Agentic Memory System** that revolutionizes trading by giving algorithms the ability to:
 
-### Equity Curve Balancing
-- **Historical Pattern Matching**: Before each trade, queries the database for similar historical market conditions
-- **Directional Bias Intelligence**: Tips the scales toward profitable directions by analyzing recent long vs short performance
-- **Dynamic Risk Adjustment**: Optimizes stop-loss and take-profit levels based on what worked in comparable past situations
-- **Loss Pattern Avoidance**: Probabilistically rejects trades when market conditions match historical loss patterns
+1. **Remember**: Store detailed feature vectors (140+ market indicators) for every trade
+2. **Learn**: Identify which features correlate with profitable vs unprofitable outcomes
+3. **Adapt**: Dynamically adjust risk parameters based on similar historical patterns
+4. **Protect**: Implement anti-overfitting mechanisms to prevent pattern exploitation
 
-## How It Works
+The system uses **graduated feature matching** to find truly similar market conditions, not just superficial pattern matches. Instead of asking "have we seen this exact pattern before?", it asks "what happened in similar market conditions, and what can we learn?"
 
-When evaluating a potential trade:
+### Key Innovation: Range-Based Intelligence
 
-1. **Market State Analysis**: Current market features are extracted (volatility, momentum, etc.)
-2. **Historical Query**: System searches stored data for trades in similar market conditions
-3. **Outcome Analysis**: Evaluates profit/loss patterns from historical matches
-4. **Risk Optimization**: Calculates optimal risk parameters based on successful historical trades
-5. **Directional Assessment**: Considers recent directional performance to bias toward profitable patterns
-6. **Continuous Learning**: Stores new trade outcomes to improve future decisions
+Rather than simple similarity matching, FluidJournal uses range-based analysis:
+- Identifies optimal feature ranges from profitable trades (e.g., volatility between 0.019-0.034)
+- Rejects trades when key features fall outside profitable ranges
+- Provides confidence scores based on how well current conditions match profitable patterns
 
-## System Architecture
+### Visual: Feature Graduation Process
 
-### Storage Agent (`localhost:3015`)
-- **LanceDB Integration**: High-performance vector storage optimized for trading data
-- **Data Validation**: Ensures trade data integrity and consistency
-- **Query Engine**: Fast similarity search across historical trade patterns
-- **REST API**: Clean endpoints for storing and retrieving trade data
+```
+STAGE 1: All Features (140+)           STAGE 2: Graduated Features         STAGE 3: Learned Ranges
+┌─────────────────────────────┐       ┌─────────────────────────┐        ┌─────────────────────────┐
+│ ▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪ │       │                         │        │   ATR%: [0.019-0.034] ✓ │
+│ ▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪ │       │      ⬤ ATR_percentage   │        │   RSI:  [35.0-65.0]  ✓ │
+│ ▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪ │  ───> │      ⬤ RSI_14          │  ───>  │   VOL:  [0.8-1.5]    ✓ │
+│ ▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪ │       │      ⬤ Volume_ratio     │        │   EMA:  [0.99-1.01]  ✓ │
+│ ▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪ │       │      ⬤ EMA_distance     │        │                         │
+│ ▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪ │       │      ⬤ Wick_ratio       │        │   Current Query:        │
+└─────────────────────────────┘       └─────────────────────────┘        │   ATR%: 0.025 ✓ (85%)   │
+     Raw Data Collection                 Feature Correlation               │   RSI:  42.0  ✓ (92%)   │
+     (All market metrics)                (Top 10-15 predictive)            │   VOL:  2.1   ✗ (15%)   │
+                                                                          │                         │
+                                                                          │   REJECT: Low confidence │
+                                                                          └─────────────────────────┘
+                                                                               Range Intelligence
+```
 
-### Risk Service (`localhost:3017`)
-- **FluidRiskModel**: Continuous probability-based risk evaluation engine
-- **Directional Bias Analysis**: Probabilistic rejection system to favor profitable directions  
-- **Feature Analysis**: Statistical correlation between market conditions and outcomes
-- **Risk Parameter Calculation**: Dynamic stop-loss and take-profit optimization
-- **Equity Curve Tracking**: Real-time monitoring of trading performance
+The system evolves from collecting everything → identifying what matters → learning profitable ranges
 
-## Key Innovations
+## Agents
 
-### FluidRiskModel Engine
-Replaces rigid if/then decision trees with continuous probability functions that evaluate:
-- **Equity Protection** (30%): Recent performance and drawdown analysis
-- **Market Regime Fit** (25%): Statistical alignment with profitable market conditions
-- **Loss Avoidance** (25%): K-nearest neighbor analysis to avoid historically unprofitable patterns
-- **Profit Similarity** (20%): Kernel-weighted matching to profitable historical trades
+The system consists of specialized agents that work together to create an intelligent, adaptive trading system:
 
-### Directional Bias Intelligence  
-Analyzes recent long vs short performance to probabilistically reject trades in underperforming directions. This "tips the scales" toward more profitable directional patterns without completely blocking any direction.
+### 1. Storage Agent
+**Location**: `/agentic_memory/storage-agent/`
 
-### Position-Size Normalized Analysis
-All comparisons account for position size differences, ensuring fair analysis between trades of varying contract quantities using per-contract PnL normalization.
+**Role**: The memory keeper of the system
+- Stores feature vectors using LanceDB for efficient similarity search
+- Captures 140+ features per trade including price action, volume, volatility, and technical indicators
+- Records complete trade lifecycle: entry features, exit outcomes, and bar-by-bar profit trajectories
+- Handles both real-time storage and historical data ingestion
+
+**Key Capabilities**:
+- Vector similarity search across millions of trades
+- Trajectory analysis (profit/loss progression over time)
+- Data persistence with schema evolution support
+
+### 2. Risk Management Agent
+**Location**: `/agentic_memory/risk-service/`
+
+**Role**: The decision maker that learns from experience
+- Analyzes incoming trades against historical patterns
+- Calculates optimal stop-loss and take-profit levels based on similar past trades
+- Implements graduated feature matching to find truly relevant historical patterns
+- Provides confidence scores and detailed reasoning for risk decisions
+
+**Key Capabilities**:
+- Range-based analysis (identifies profitable vs unprofitable feature ranges)
+- Recent trade analysis (prevents repeating recent mistakes)
+- Anti-overfitting protection (tracks pattern usage and applies diminishing returns)
+- Adaptive risk parameters based on market conditions
+
+### 3. Memory Manager
+**Location**: `/agentic_memory/risk-service/memoryManager.js`
+
+**Role**: The intelligence layer that maintains graduated feature importance
+- Continuously analyzes which features correlate with profitable outcomes
+- Updates feature importance every 30 minutes based on recent trades
+- Maintains separate graduation tables for each instrument and direction
+- Provides the "graduated features" that other agents use for similarity matching
+
+**Key Capabilities**:
+- Feature correlation analysis with P&L outcomes
+- Dynamic feature weighting based on predictive power
+- Instrument-specific learning (MGC long patterns differ from ES short patterns)
+- Statistical significance testing for reliable feature selection
+
+## Their Roles
+
+### Working Together
+
+1. **Trade Entry Flow**:
+   - NinjaTrader generates entry signal with market features
+   - Risk Agent queries Storage Agent for similar historical patterns
+   - Memory Manager provides graduated features for similarity matching
+   - Risk Agent returns optimal SL/TP based on historical outcomes
+   - Storage Agent records the entry features
+
+2. **Trade Exit Flow**:
+   - NinjaTrader reports trade outcome
+   - Storage Agent stores complete record with P&L and exit reason
+   - Memory Manager updates feature correlations
+   - System learns from the outcome for future decisions
+
+3. **Continuous Learning**:
+   - Memory Manager analyzes outcomes every 30 minutes
+   - Updates graduated feature importance
+   - Risk Agent immediately uses updated intelligence
+   - System adapts to changing market conditions
+
+### Anti-Overfitting Protection
+
+The agents implement multiple layers of protection against overfitting:
+
+1. **Pattern Usage Tracking**: Risk Agent tracks how many times each pattern is used
+2. **Diminishing Returns**: Confidence decreases with each pattern reuse (e.g., 100% → 60% → 36%)
+3. **Time Windows**: Prevents rapid reuse of patterns within specified time periods
+4. **Exposure Limits**: Hard cap on pattern usage (e.g., max 3 uses per pattern)
+5. **Out-of-Sample Validation**: "Do not store" mode for true blind testing
+
+This creates a system that learns from experience while avoiding the trap of memorizing specific market conditions that may never repeat exactly.
 
 ## Getting Started
 
 ### Prerequisites
 - Node.js 18+
 - Windows environment (PowerShell scripts provided)
-- Trading platform with REST API integration capability
+- NinjaTrader 8 or compatible trading platform
 
 ### Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/CaptrainWalrus/FluidJournal.git
+git clone https://github.com/yourusername/FluidJournal.git
 cd FluidJournal
 
 # Install dependencies for both services
 cd agentic_memory/storage-agent && npm install
 cd ../risk-service && npm install
 
+# Configure environment variables
+# Copy .env.example to .env in both directories and update settings
+
 # Start both services
+cd ../.. 
 ./start-services.ps1
 ```
 
@@ -90,71 +170,9 @@ Services will be available at:
 - **Storage Agent**: http://localhost:3015
 - **Risk Service**: http://localhost:3017
 
-### Integration
+### Configuration
 
-#### Risk Evaluation
-```javascript
-POST http://localhost:3017/api/evaluate-risk
-{
-  "instrument": "MGC",
-  "direction": "long", 
-  "features": {
-    "close_price": 2750.5,
-    "atr_percentage": 0.025,
-    "volume_ratio": 1.2,
-    "rsi_14": 45.8,
-    // ... 90+ additional market features
-  },
-  "timestamp": 1642680000000
-}
+See individual agent READMEs for detailed configuration:
+- [Storage Agent README](./agentic_memory/storage-agent/README.md)
+- [Risk Service README](./agentic_memory/risk-service/README.md)
 
-// Response
-{
-  "approved": true,
-  "confidence": 0.78,
-  "suggested_sl": 12,
-  "suggested_tp": 25,
-  "reasons": ["Fluid risk analysis: 78.0% confidence", ...],
-  "risk_model": "fluid-v1"
-}
-```
-
-#### Trade Storage
-```javascript
-POST http://localhost:3015/api/store-vector
-{
-  "sessionId": "live_trading",
-  "instrument": "MGC", 
-  "direction": "long",
-  "features": { /* market conditions */ },
-  "outcome": {
-    "pnl": 180,
-    "pnlPerContract": 180, 
-    "exitReason": "profit_target",
-    "maxProfit": 220,
-    "maxLoss": -45
-  },
-  "timestamp": 1642680000000
-}
-```
-
-## Technology Stack
-
-- **Node.js**: Microservices runtime with native fetch support
-- **LanceDB**: Apache Arrow-based vector database for high-dimensional data
-- **Express.js**: RESTful API framework
-- **Statistical Analysis**: Custom algorithms for pattern recognition and risk optimization
-
-## Business Impact
-
-FluidJournal transforms trading from reactive to adaptive:
-
-- **Reduced Drawdowns**: Automatically avoids trades during historically unfavorable market conditions
-- **Optimized Risk/Reward**: Dynamically adjusts position sizing and risk parameters based on proven historical outcomes  
-- **Directional Intelligence**: Biases trade approval toward recently profitable directions
-- **Continuous Improvement**: System becomes more intelligent with every completed trade
-- **Institutional Memory**: Never forgets what worked and what didn't in specific market conditions
-
----
-
-*Built for serious algorithmic traders who want their systems to learn from experience and adapt to market conditions.*

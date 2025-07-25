@@ -25,6 +25,7 @@
 agentic_memory/storage-agent/data/
 agentic_memory/storage-agent/training_data/
 agentic_memory/storage-agent/logs/
+agentic_memory/storage-agent/test_db/
 agentic_memory/gp-service/
 agentic_memory/venv/
 
@@ -48,6 +49,8 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+*.jsonl
+*.archived
 
 # ==========================================
 # WHAT WE KEEP: Only operational JS code

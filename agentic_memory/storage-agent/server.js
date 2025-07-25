@@ -2,7 +2,12 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
+// DEBUG: Check environment variables after loading .env
+console.log('🔍 [ENV-CHECK] LANCEDB_PATH:', process.env.LANCEDB_PATH);
+console.log('🔍 [ENV-CHECK] FORCE_STORE_ALL:', process.env.FORCE_STORE_ALL);
+
 const vectorStore = require('./src/vectorStore');
+console.log('🔍 [ENV-CHECK] VectorStore dbPath:', vectorStore.dbPath);
 const TradeClassifier = require('./src/tradeClassifier');
 const PatternClusterer = require('./src/patternClusterer');
 const OfflineProcessor = require('./src/offlineProcessor');
@@ -24,7 +29,7 @@ const PORT = process.env.STORAGE_PORT || 3015;
 // Phase 2: Initialize Trade Classifier and Pattern Clusterer
 const tradeClassifier = new TradeClassifier();
 const patternClusterer = new PatternClusterer();
-console.log('Trade classifier and pattern clusterer initialized for Phase 2 analysis');
+console.log('Enhanced Storage Agent: Trade classifier and pattern clusterer initialized with 140-feature support and duration prediction');
 
 // Phase 3: Initialize Offline Processing System
 const offlineProcessor = new OfflineProcessor();
@@ -84,11 +89,18 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health check endpoint
+// Health check endpoint with enhanced capabilities
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     service: 'agentic-memory-storage-agent',
+    version: '2.0.0-enhanced',
+    features: {
+      vectorCount: 140,
+      durationPrediction: true,
+      moveClassification: true,
+      sustainabilityScoring: true
+    },
     timestamp: new Date().toISOString()
   });
 });
@@ -216,7 +228,8 @@ app.post('/api/store-vector', async (req, res) => {
     if (classification.shouldStore || process.env.FORCE_STORE_ALL === 'true') {
       console.log(`[STORE-VECTOR] Attempting to store vector for ${entrySignalId}...`);
       try {
-        vectorId = await vectorStore.storeVector(vectorData);
+        const result = await vectorStore.storeVector(vectorData);
+        vectorId = result.vectorId;
         stored = true;
         console.log(`[TRADE-CLASSIFIER] ✅ STORED: ${entrySignalId} - Importance: ${(classification.importance * 100).toFixed(0)}% - ID: ${vectorId}`);
       } catch (storeError) {
@@ -329,7 +342,8 @@ app.post('/api/store-features', async (req, res) => {
       status: 'UNIFIED'
     };
     
-    const vectorId = await vectorStore.storeVector(featureRecord);
+    const result = await vectorStore.storeVector(featureRecord);
+    const vectorId = result.vectorId;
     
     const duration = Date.now() - startTime;
     console.info('Features stored successfully', {
@@ -505,7 +519,8 @@ app.post('/api/store-outcome', async (req, res) => {
       importance: classification.importance  // Top-level for easy querying
     };
     
-    const vectorId = await vectorStore.storeVector(outcomeRecord);
+    const result = await vectorStore.storeVector(outcomeRecord);
+    const vectorId = result.vectorId;
     
     const duration = Date.now() - startTime;
     console.info('Outcome stored successfully', {
@@ -1119,12 +1134,12 @@ app.get('/api/export/csv', async (req, res) => {
     const firstFeatures = JSON.parse(vectors[0].featuresJson || '{}');
     const featureNames = Object.keys(firstFeatures).sort();
     
-    // Create CSV header
+    // Create CSV header - using schema field names
     const headers = [
-      'id', 'timestamp', 'instrument', 'entryType', 'direction',
+      'id', 'timestamp', 'inst', 'type', 'dir',
       ...featureNames,
-      'stopLoss', 'takeProfit', 'pnl', 'pnlPoints', 
-      'holdingBars', 'exitReason', 'maxProfit', 'maxLoss', 'wasGoodExit'
+      'stopLoss', 'takeProfit', 'pnl', 'pnlPts', 
+      'bars', 'exit', 'maxP', 'maxL', 'good'
     ];
     
     // Create CSV content
@@ -1137,19 +1152,19 @@ app.get('/api/export/csv', async (req, res) => {
         const row = [
           vector.id,
           vector.timestamp,
-          vector.instrument,
-          vector.entryType,
-          vector.direction,
+          vector.inst,
+          vector.type,
+          vector.dir,
           ...featureNames.map(name => features[name] || 0),
           vector.stopLoss,
           vector.takeProfit,
           vector.pnl,
-          vector.pnlPoints,
-          vector.holdingBars,
-          vector.exitReason,
-          vector.maxProfit,
-          vector.maxLoss,
-          vector.wasGoodExit
+          vector.pnlPts,
+          vector.bars,
+          vector.exit,
+          vector.maxP,
+          vector.maxL,
+          vector.good
         ];
         
         csvLines.push(row.map(val => {
@@ -1203,6 +1218,8 @@ async function startServer() {
     console.log('🚀 [STARTUP] Offline processor initialized');
     
     // Check if database is empty and needs initialization
+    // TEMP: Skip stats check during startup to avoid hang
+    /*
     try {
       const stats = await vectorStore.getStats();
       if (stats.totalVectors === 0) {
@@ -1243,6 +1260,7 @@ async function startServer() {
     } catch (initError) {
       console.warn('Could not check/initialize schema:', initError.message);
     }
+    */
 
     app.listen(PORT, () => {
       console.log(`🚀 [STARTUP] Express server listening on port ${PORT}`);
@@ -1250,11 +1268,13 @@ async function startServer() {
       console.info(`Storage Agent listening on port ${PORT}`, {
         port: PORT,
         environment: process.env.NODE_ENV || 'development',
-        lancedb_path: process.env.LANCEDB_PATH || './data/vectors'
+        lancedb_path: vectorStore.dbPath,
+        note: 'Using NEW optimized database (vectors_fresh) - old database archived'
       });
       
       // Show startup stats table
-      setTimeout(showStartupStats, 1000);
+      // TEMP: Skip stats display to avoid hang
+      // setTimeout(showStartupStats, 1000);
     });
 
   } catch (error) {
@@ -1475,7 +1495,8 @@ async function attemptUnion(entrySignalId) {
       };
       
       // Store unified vector
-      const vectorId = await vectorStore.storeVector(unifiedVector);
+      const result = await vectorStore.storeVector(unifiedVector);
+      const vectorId = result.vectorId;
       
       // Cleanup fragments (mark as unified rather than delete for safety)
       await vectorStore.updateVectorStatus(featureRecord.id, 'UNIFIED_CLEANUP');
@@ -2297,6 +2318,108 @@ app.get('/api/live-performance/equity-curve', async (req, res) => {
   } catch (error) {
     console.error('Failed to get equity curve:', error);
     res.status(500).json({ error: 'Failed to get equity curve' });
+  }
+});
+
+// ENHANCED: Duration prediction endpoint
+app.post('/api/predict-duration', async (req, res) => {
+  try {
+    const { features, instrument, minimumDuration = 15 } = req.body;
+
+    if (!features) {
+      return res.status(400).json({
+        success: false,
+        error: 'Features required for duration prediction'
+      });
+    }
+
+    console.log(`[DURATION-PREDICTION] Request for ${instrument}, minimum: ${minimumDuration}min`);
+
+    const prediction = await vectorStore.predictDuration(features, {
+      instrument,
+      minimumDuration
+    });
+
+    res.json({
+      success: true,
+      prediction,
+      enhancedPrediction: true
+    });
+
+  } catch (error) {
+    console.error('Duration prediction failed:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// ENHANCED: Enhanced statistics with duration/move type analysis
+app.get('/api/enhanced-stats', async (req, res) => {
+  try {
+    const stats = await vectorStore.getStats();
+    
+    // Add enhanced statistics
+    const allVectors = await vectorStore.getVectors({ limit: 100000 });
+    
+    // Duration analysis
+    const durationStats = {};
+    const moveTypeStats = {};
+    let totalSustainability = 0;
+    let sustainabilityCount = 0;
+    
+    allVectors.forEach(vector => {
+      // Duration brackets
+      const bracket = vector.durationBracket || 'unknown';
+      if (!durationStats[bracket]) {
+        durationStats[bracket] = { count: 0, avgPnl: 0, totalPnl: 0 };
+      }
+      durationStats[bracket].count++;
+      durationStats[bracket].totalPnl += vector.pnl || 0;
+      
+      // Move types
+      const moveType = vector.moveType || 'unknown';
+      if (!moveTypeStats[moveType]) {
+        moveTypeStats[moveType] = { count: 0, avgSustainability: 0, totalSustainability: 0 };
+      }
+      moveTypeStats[moveType].count++;
+      
+      const sustainability = vector.sustainabilityScore || 0;
+      moveTypeStats[moveType].totalSustainability += sustainability;
+      totalSustainability += sustainability;
+      sustainabilityCount++;
+    });
+    
+    // Calculate averages
+    Object.keys(durationStats).forEach(bracket => {
+      const stat = durationStats[bracket];
+      stat.avgPnl = stat.count > 0 ? stat.totalPnl / stat.count : 0;
+    });
+    
+    Object.keys(moveTypeStats).forEach(type => {
+      const stat = moveTypeStats[type];
+      stat.avgSustainability = stat.count > 0 ? stat.totalSustainability / stat.count : 0;
+    });
+
+    res.json({
+      success: true,
+      ...stats,
+      enhanced: {
+        durationStats,
+        moveTypeStats,
+        avgSustainability: sustainabilityCount > 0 ? totalSustainability / sustainabilityCount : 0,
+        featureCount: 140
+      },
+      enhancedStats: true
+    });
+
+  } catch (error) {
+    console.error('Enhanced stats failed:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
 });
 
